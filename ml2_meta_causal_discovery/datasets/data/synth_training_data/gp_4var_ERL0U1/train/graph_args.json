@@ -1,0 +1,1 @@
+{"graph_type": ["ER"], "graph_degrees_upper": 4, "graph_degrees_lower": 0, "num_variables": 4, "num_samples": 1000, "function_generator": "gp"}

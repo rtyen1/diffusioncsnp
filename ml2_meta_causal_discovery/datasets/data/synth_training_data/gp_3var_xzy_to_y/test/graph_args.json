@@ -1,0 +1,11 @@
+{
+  "graph_type": [
+    "FIXED_X_TO_Y_AND_Z_TO_Y"
+  ],
+  "graph_degrees_upper": 2,
+  "graph_degrees_lower": 2,
+  "num_variables": 3,
+  "num_samples": 1000,
+  "function_generator": "gp",
+  "description": "All test graphs are fixed as X->Y and Z->Y"
+}

@@ -1,0 +1,130 @@
+{
+    "Expected SHD": {
+        "CSIvA": {
+            "mean": 67.34459991455078,
+            "variance": 12.287730221833217,
+            "variance_of_mean": 1.2287730221833217,
+            "sqrt_variance_of_mean": 1.1085003483009475
+        },
+        "BayesDAG": {
+            "mean": 99.0904,
+            "variance": 8.156349155555533,
+            "variance_of_mean": 0.8156349155555533,
+            "sqrt_variance_of_mean": 0.9031250830065309
+        },
+        "DiBS": {
+            "mean": 59.834375,
+            "variance": 14.962250434027785,
+            "variance_of_mean": 1.4962250434027786,
+            "sqrt_variance_of_mean": 1.2232027809822779
+        },
+        "BCNP": {
+            "mean": 50.87080039978027,
+            "variance": 36.943271887001835,
+            "variance_of_mean": 3.6943271887001834,
+            "sqrt_variance_of_mean": 1.9220632634489905
+        },
+        "AVICI": {
+            "mean": 48.944400024414065,
+            "variance": 56.380749477380114,
+            "variance_of_mean": 5.638074947738011,
+            "sqrt_variance_of_mean": 2.374463086202439
+        }
+    },
+    "Expected Edge F1": {
+        "CSIvA": {
+            "mean": 0.07394116315043486,
+            "variance": 0.0001330363979789323,
+            "variance_of_mean": 1.3303639797893231e-05,
+            "sqrt_variance_of_mean": 0.0036474154956480116
+        },
+        "BayesDAG": {
+            "mean": 0.09778421081053822,
+            "variance": 0.0007105375194336524,
+            "variance_of_mean": 7.105375194336524e-05,
+            "sqrt_variance_of_mean": 0.008429338760743053
+        },
+        "DiBS": {
+            "mean": 0.15350256584702499,
+            "variance": 0.0008700112846752329,
+            "variance_of_mean": 8.700112846752328e-05,
+            "sqrt_variance_of_mean": 0.0093274395451015
+        },
+        "BCNP": {
+            "mean": 0.1718305426858894,
+            "variance": 0.0013494480823967496,
+            "variance_of_mean": 0.00013494480823967496,
+            "sqrt_variance_of_mean": 0.011616574720616873
+        },
+        "AVICI": {
+            "mean": 0.08794429129496541,
+            "variance": 0.0005999737653377343,
+            "variance_of_mean": 5.9997376533773435e-05,
+            "sqrt_variance_of_mean": 0.007745797346546928
+        }
+    },
+    "AUC": {
+        "CSIvA": {
+            "mean": 0.3658580219858706,
+            "variance": 0.010616634578578223,
+            "variance_of_mean": 0.0010616634578578224,
+            "sqrt_variance_of_mean": 0.03258317752856253
+        },
+        "BayesDAG": {
+            "mean": 0.5233207902322669,
+            "variance": 0.017552050506577755,
+            "variance_of_mean": 0.0017552050506577754,
+            "sqrt_variance_of_mean": 0.041895167390258455
+        },
+        "DiBS": {
+            "mean": 0.8090089799438633,
+            "variance": 0.003406787938416063,
+            "variance_of_mean": 0.0003406787938416063,
+            "sqrt_variance_of_mean": 0.018457486119231033
+        },
+        "BCNP": {
+            "mean": 0.8443418177793489,
+            "variance": 0.0028137907272338387,
+            "variance_of_mean": 0.00028137907272338385,
+            "sqrt_variance_of_mean": 0.016774357594953788
+        },
+        "AVICI": {
+            "mean": 0.661322360453596,
+            "variance": 0.011793023016640654,
+            "variance_of_mean": 0.0011793023016640654,
+            "sqrt_variance_of_mean": 0.034340971181142585
+        }
+    },
+    "Negative Log Probability": {
+        "CSIvA": {
+            "mean": -100.5854507446289,
+            "variance": 62.15916565775665,
+            "variance_of_mean": 6.215916565775665,
+            "sqrt_variance_of_mean": 2.493173994284327
+        },
+        "BayesDAG": {
+            "mean": -195.5328857421875,
+            "variance": 2816.490281613378,
+            "variance_of_mean": 281.6490281613378,
+            "sqrt_variance_of_mean": 16.782402335820038
+        },
+        "DiBS": {
+            "mean": -83.30649261474609,
+            "variance": 28.072947076614938,
+            "variance_of_mean": 2.8072947076614936,
+            "sqrt_variance_of_mean": 1.675498346063491
+        },
+        "BCNP": {
+            "mean": -76.35157012939453,
+            "variance": 130.5318038980347,
+            "variance_of_mean": 13.053180389803469,
+            "sqrt_variance_of_mean": 3.6129185418167773
+        },
+        "AVICI": {
+            "mean": -90.81753540039062,
+            "variance": 232.4003939231109,
+            "variance_of_mean": 23.24003939231109,
+            "sqrt_variance_of_mean": 4.820792402946957
+        }
+    }
+}
