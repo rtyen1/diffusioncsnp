@@ -40,6 +40,43 @@ def random_kahn_topological_sort(adj: torch.Tensor) -> List[int]:
     return order
 
 
+def priority_kahn_topological_sort(adj: torch.Tensor, priority: torch.Tensor) -> List[int]:
+    """
+    Produce a unique root-to-leaf topological order using priority tie-breaking.
+
+    Args:
+        adj: Tensor of shape [num_nodes, num_nodes], where adj[i, j] = 1 means i -> j.
+        priority: Tensor of shape [num_nodes]. Smaller values are selected earlier
+            among currently available source nodes.
+
+    Returns:
+        A list of node indices in root-to-leaf topological order.
+    """
+    graph = (adj.detach().cpu() > 0.5).to(torch.int64)
+    priority_cpu = priority.detach().cpu()
+    num_nodes = graph.size(0)
+    if priority_cpu.numel() != num_nodes:
+        raise ValueError("priority must have one value per node.")
+
+    indegree = graph.sum(dim=0).tolist()
+    available = [i for i in range(num_nodes) if indegree[i] == 0]
+    order: List[int] = []
+
+    while available:
+        node = min(available, key=lambda i: (float(priority_cpu[i]), i))
+        available.remove(node)
+        order.append(node)
+        children = torch.nonzero(graph[node], as_tuple=False).flatten().tolist()
+        for child in children:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                available.append(child)
+
+    if len(order) != num_nodes:
+        raise ValueError("Graph is cyclic; cannot sample a topological order.")
+    return order
+
+
 def sample_topological_orders(target: torch.Tensor, num_orders: int) -> torch.Tensor:
     """
     Sample K topological orders for each graph in a batch.

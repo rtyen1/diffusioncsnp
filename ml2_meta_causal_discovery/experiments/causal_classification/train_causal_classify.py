@@ -19,6 +19,7 @@ from ml2_meta_causal_discovery.models.causaltransformernp import (
 )
 from ml2_meta_causal_discovery.models.topo_order_diffusion import (
     CausalTopoOrderDiffusion,
+    CausalPriorityTopoOrderDiffusion,
 )
 try:
     from ml2_meta_causal_discovery.models.causaltransformernp import CausalProbabilisticARDecoder
@@ -116,18 +117,19 @@ def npf_main(args):
         [i for i in val_files if i.suffix == ".hdf5"], max_node_num=args.num_nodes
     )
 
-    model_dtype = torch.float32 if args.decoder == "topo_diffusion" else torch.bfloat16
+    topo_decoders = {"topo_diffusion", "topo_priority_diffusion"}
+    model_dtype = torch.float32 if args.decoder in topo_decoders else torch.bfloat16
 
     TNPD_KWARGS = dict(
         d_model=args.dim_model,
         emb_depth=1,
         dim_feedforward=args.dim_feedforward,
         nhead=args.nhead,
-        dropout=args.topo_dropout if args.decoder == "topo_diffusion" else 0.0,
+        dropout=args.topo_dropout if args.decoder in topo_decoders else 0.0,
         num_layers_encoder=args.num_layers_encoder,
         num_layers_decoder=(
             args.topo_denoise_layers
-            if args.decoder == "topo_diffusion"
+            if args.decoder in topo_decoders
             else args.num_layers_decoder
         ),
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -144,6 +146,7 @@ def npf_main(args):
         topo_reverse=args.topo_reverse,
         topo_reverse_steps=args.topo_reverse_steps,
         topo_beam_size=args.topo_beam_size,
+        topo_priority_scale_init=args.topo_priority_scale_init,
     )
 
     if args.decoder == "probabilistic":
@@ -162,10 +165,12 @@ def npf_main(args):
         module = AviciDecoder
     elif args.decoder == "topo_diffusion":
         module = CausalTopoOrderDiffusion
+    elif args.decoder == "topo_priority_diffusion":
+        module = CausalPriorityTopoOrderDiffusion
     else:
         raise ValueError(
             "Decoder must be probabilistic, probabilistic_ar, autoregressive, "
-            "transformer or topo_diffusion"
+            "transformer, topo_diffusion or topo_priority_diffusion"
         )
 
     model_1d = partial(
@@ -218,13 +223,13 @@ def npf_main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         lr_warmup_ratio=args.lr_warmup_ratio, # Should be around 10% of the total steps
-        bfloat16=args.decoder != "topo_diffusion",
+        bfloat16=args.decoder not in topo_decoders,
         save_dir=save_dir,
         sample_size_min=args.sample_size_min,
         sample_size_max=args.sample_size_max,
     )
     trainer.train()
-    if args.decoder == "topo_diffusion":
+    if args.decoder in topo_decoders:
         metric_dict = trainer.test_single_epoch(
             test_loader=trainer.test_loader,
             metric_dict={},

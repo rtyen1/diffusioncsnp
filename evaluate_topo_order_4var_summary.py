@@ -152,12 +152,18 @@ def load_model(
         config = json.load(f)
 
     module = config.get("module", "probabilistic")
-    if module == "topo_diffusion":
+    if module in {"topo_diffusion", "topo_priority_diffusion"}:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
             CausalTopoOrderDiffusion,
+            CausalPriorityTopoOrderDiffusion,
         )
 
-        model = CausalTopoOrderDiffusion(
+        topo_cls = (
+            CausalPriorityTopoOrderDiffusion
+            if module == "topo_priority_diffusion"
+            else CausalTopoOrderDiffusion
+        )
+        model = topo_cls(
             d_model=config["d_model"],
             emb_depth=1,
             dim_feedforward=config["dim_feedforward"],
@@ -175,6 +181,7 @@ def load_model(
             topo_reverse=config.get("topo_reverse", "generalized_PL"),
             topo_reverse_steps=config.get("topo_reverse_steps", None),
             topo_beam_size=config.get("topo_beam_size", 20),
+            topo_priority_scale_init=config.get("topo_priority_scale_init", -2.0),
             device=device,
             dtype=th.float32,
         ).to(device)
@@ -290,15 +297,33 @@ def sample_topo_diffusion_orders(
     inputs = encode_input(data, device=device, standardize=standardize)
     with th.no_grad():
         node_repr = model._encode_raw_data(inputs, mask=None)
-        node_repr = node_repr.repeat_interleave(num_order_samples, dim=0)
         was_training = model.reverse_model.training
         model.reverse_model.eval()
         try:
-            _, orders = model.diffusion_utils.p_sample_loop(
-                node_repr,
-                model.reverse_model,
-                deterministic=deterministic,
-            )
+            if hasattr(model, "_p_sample_loop_with_priority"):
+                batch_size, num_nodes, d_model = node_repr.shape
+                priority = th.rand(
+                    (num_order_samples * batch_size, num_nodes),
+                    device=node_repr.device,
+                    dtype=node_repr.dtype,
+                )
+                node_repr = (
+                    node_repr.unsqueeze(0)
+                    .expand(num_order_samples, batch_size, num_nodes, d_model)
+                    .reshape(num_order_samples * batch_size, num_nodes, d_model)
+                )
+                _, orders = model._p_sample_loop_with_priority(
+                    node_repr,
+                    priority_start=priority,
+                    deterministic=deterministic,
+                )
+            else:
+                node_repr = node_repr.repeat_interleave(num_order_samples, dim=0)
+                _, orders = model.diffusion_utils.p_sample_loop(
+                    node_repr,
+                    model.reverse_model,
+                    deterministic=deterministic,
+                )
         finally:
             model.reverse_model.train(was_training)
     # Batched p_sample_loop returns [num_samples, d], root-to-leaf.

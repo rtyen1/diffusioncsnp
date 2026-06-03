@@ -214,6 +214,12 @@ def retun_default_args(parser):
         help="Number of SymmetricDiffusers denoising transformer layers for --decoder topo_diffusion.",
     )
     parser.add_argument(
+        "--topo_priority_scale_init",
+        default=-2.0,
+        type=float,
+        help="Initial log-scale for priority score bias in --decoder topo_priority_diffusion.",
+    )
+    parser.add_argument(
         "--use_positional_encoding",
         "-upe",
         default=False,

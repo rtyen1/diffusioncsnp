@@ -15,10 +15,14 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from ml2_meta_causal_discovery.models.causaltransformercomponents import CausalTNPEncoder
-from ml2_meta_causal_discovery.utils.topological_orders import random_kahn_topological_sort
+from ml2_meta_causal_discovery.utils.topological_orders import (
+    priority_kahn_topological_sort,
+    random_kahn_topological_sort,
+)
 
 
 _SYMMETRIC_DIFFUSERS_DIR = Path(__file__).resolve().parents[2] / "SymmetricDiffusers"
@@ -26,6 +30,7 @@ if str(_SYMMETRIC_DIFFUSERS_DIR) not in sys.path:
     sys.path.insert(0, str(_SYMMETRIC_DIFFUSERS_DIR))
 
 import utils as _sd_utils  # noqa: E402,F401
+import PL_distribution as PL  # noqa: E402
 from diffusion import DiffusionUtils  # noqa: E402
 from models import EncoderLayers  # noqa: E402
 from models import TimestepEmbedder  # noqa: E402
@@ -100,6 +105,77 @@ class CausalEmbeddingReverseDiffusion(nn.Module):
         row, col = torch.split(out, [num_nodes, num_nodes], dim=-2)
         scores = torch.matmul(row, col.transpose(-1, -2))
         return scores.unflatten(0, batch_shape)
+
+
+class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
+    """
+    Reverse denoiser with exogenous priority conditioning.
+
+    The causal encoder representation is unchanged. Priority is tied to nodes,
+    gathered with the same current noisy permutation as the node embeddings, and
+    added as a monotone candidate bias to generalized-PL scores.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        num_layers: int,
+        dropout: float,
+        priority_scale_init: float = -2.0,
+    ):
+        super().__init__(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+        self.priority_log_scale = nn.Parameter(torch.tensor(float(priority_scale_init)))
+
+    @staticmethod
+    def _permute_priority(perm_list: Tensor, priority: Tensor) -> Tensor:
+        priority = priority.unsqueeze(-1)
+        priority, perm_list = torch.broadcast_tensors(priority, perm_list.unsqueeze(-1))
+        return torch.gather(priority, -2, perm_list).squeeze(-1)
+
+    def training_patch_priority(self, src: Tensor, priority_start: Tensor) -> Tensor:
+        return self._permute_priority(src, priority_start)
+
+    def eval_patch_priority(self, src: Tensor, priority_start: Tensor) -> Tensor:
+        return self._permute_priority(src, priority_start.unsqueeze(-2))
+
+    def forward(
+        self,
+        src: Tensor,
+        time: Tensor,
+        x_start: Tensor,
+        priority_start: Tensor,
+    ) -> Tensor:
+        batch_shape = src.shape[:-1]
+        num_nodes = src.size(-1)
+
+        if src.dim() == 4:
+            priority_noisy = self.training_patch_priority(src, priority_start)
+            time = time.expand(batch_shape)
+            src = self.training_patch_embd(src, x_start)
+        else:
+            priority_noisy = self.eval_patch_priority(src, priority_start)
+            time = time.unsqueeze(-1).expand(batch_shape)
+            src = self.eval_patch_embd(src, x_start)
+
+        time = time.flatten()
+        time_embd = self.time_embd(time).to(dtype=src.dtype)
+
+        out = self.encoder_layers(src, time_embd)
+        row, col = torch.split(out, [num_nodes, num_nodes], dim=-2)
+        scores = torch.matmul(row, col.transpose(-1, -2))
+        scores = scores.unflatten(0, batch_shape)
+
+        scale = F.softplus(self.priority_log_scale).to(dtype=scores.dtype)
+        priority_bias = -scale * priority_noisy.to(dtype=scores.dtype)
+        return scores + priority_bias.unsqueeze(-2)
 
 
 class CausalTopoOrderDiffusion(CausalTNPEncoder):
@@ -335,3 +411,257 @@ class CausalTopoOrderDiffusion(CausalTNPEncoder):
         denom = edge_count.clamp_min(1)
         accuracy = (correct & edge_mask).flatten(1).sum(dim=1).float() / denom.float()
         return torch.where(edge_count > 0, accuracy, torch.ones_like(accuracy))
+
+
+class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
+    """
+    Topological-order diffusion conditioned on exogenous node priorities.
+
+    A priority vector u ~ Uniform(0, 1)^D makes the training order unique via
+    priority Kahn sorting. During denoising, priorities are gathered with the
+    same current noisy permutation as node embeddings and bias generalized-PL
+    candidate scores toward smaller priorities.
+    """
+
+    def __init__(
+        self,
+        d_model,
+        emb_depth,
+        dim_feedforward,
+        nhead,
+        dropout,
+        num_layers_encoder,
+        num_layers_decoder,
+        num_nodes,
+        n_perm_samples,
+        sinkhorn_iter,
+        use_positional_encoding,
+        topo_num_timesteps: int = 7,
+        topo_sample_N: int = 1,
+        topo_transition: str = "riffle",
+        topo_reverse: str = "generalized_PL",
+        topo_reverse_steps: Optional[list[int]] = None,
+        topo_beam_size: int = 20,
+        topo_priority_scale_init: float = -2.0,
+        device=None,
+        dtype=None,
+        mlp_use_bias: bool = False,
+        **kwargs,
+    ):
+        if topo_reverse != "generalized_PL":
+            raise ValueError("CausalPriorityTopoOrderDiffusion currently supports generalized_PL only.")
+        super().__init__(
+            d_model=d_model,
+            emb_depth=emb_depth,
+            dim_feedforward=dim_feedforward,
+            nhead=nhead,
+            dropout=dropout,
+            num_layers_encoder=num_layers_encoder,
+            num_layers_decoder=num_layers_decoder,
+            num_nodes=num_nodes,
+            n_perm_samples=n_perm_samples,
+            sinkhorn_iter=sinkhorn_iter,
+            use_positional_encoding=use_positional_encoding,
+            topo_num_timesteps=topo_num_timesteps,
+            topo_sample_N=topo_sample_N,
+            topo_transition=topo_transition,
+            topo_reverse=topo_reverse,
+            topo_reverse_steps=topo_reverse_steps,
+            topo_beam_size=topo_beam_size,
+            device=device,
+            dtype=dtype,
+            mlp_use_bias=mlp_use_bias,
+            **kwargs,
+        )
+        self.reverse_model = PriorityCausalEmbeddingReverseDiffusion(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            num_layers=num_layers_decoder,
+            dropout=dropout,
+            priority_scale_init=topo_priority_scale_init,
+        )
+
+    def _sample_priorities(self, batch_size: int, num_nodes: int, device, dtype) -> Tensor:
+        return torch.rand((batch_size, num_nodes), device=device, dtype=dtype)
+
+    def _sample_batch_priority_topological_orders(
+        self,
+        graph: Tensor,
+        priority: Tensor,
+        mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        batch_size, num_nodes, _ = graph.shape
+        if mask is None:
+            valid_nodes = torch.ones((batch_size, num_nodes), dtype=torch.bool, device=graph.device)
+        else:
+            valid_nodes = mask[:, -1, :] > -1e20
+
+        orders = torch.empty((batch_size, num_nodes), dtype=torch.long, device=graph.device)
+        for b in range(batch_size):
+            valid_idx = torch.nonzero(valid_nodes[b], as_tuple=False).flatten()
+            invalid_idx = torch.nonzero(~valid_nodes[b], as_tuple=False).flatten()
+            subgraph = graph[b][valid_idx][:, valid_idx]
+            subpriority = priority[b][valid_idx]
+            local_order = priority_kahn_topological_sort(subgraph, subpriority)
+            ordered_valid = valid_idx[
+                torch.tensor(local_order, dtype=torch.long, device=graph.device)
+            ]
+            orders[b] = torch.cat([ordered_valid, invalid_idx], dim=0)
+        return orders
+
+    @staticmethod
+    def _reorder_priority(priority: Tensor, orders: Tensor) -> Tensor:
+        return torch.gather(priority, 1, orders.long())
+
+    def _training_losses_per_batch_with_priority(
+        self,
+        x_start: Tensor,
+        priority_start: Tensor,
+    ) -> Tensor:
+        device = x_start.device
+        num_nodes = x_start.size(1)
+        batch_size = x_start.size(0)
+
+        identity_perm = torch.arange(num_nodes, device=device).expand(batch_size, -1)
+        perm_seq = self.diffusion_utils.q_sample_seq(identity_perm)
+        perm_seq = perm_seq[:, self.diffusion_utils.reverse_steps, ...]
+        perm_seq_no_start = perm_seq[:, 1:, ...]
+        perm_seq_no_end = perm_seq[:, :-1, ...]
+
+        t = torch.tensor(self.diffusion_utils.reverse_steps[1:], device=device).unsqueeze(-1)
+        scores = self.reverse_model(
+            perm_seq_no_start,
+            t,
+            x_start,
+            priority_start,
+        )
+
+        p_log_probs = self.diffusion_utils.p_log_cond_prob(
+            scores,
+            perm_tm1=perm_seq_no_end,
+            perm_t=perm_seq_no_start,
+        )
+        loss = -p_log_probs.mean(dim=1)
+        return loss.mean(dim=0)
+
+    def _encode_priority_ordered_data(
+        self,
+        target_data: Tensor,
+        graph: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        batch_size, _, num_nodes = target_data.shape[:3]
+        priority = self._sample_priorities(
+            batch_size=batch_size,
+            num_nodes=num_nodes,
+            device=target_data.device,
+            dtype=target_data.dtype,
+        )
+        orders = self._sample_batch_priority_topological_orders(
+            graph,
+            priority=priority,
+            mask=mask,
+        )
+        target_data = self._reorder_nodes(target_data, orders)
+        priority_ordered = self._reorder_priority(priority, orders)
+        mask = self._reorder_mask(mask, orders)
+        if target_data.dim() == 3:
+            target_data = target_data.unsqueeze(-1)
+        node_repr = self.encode(target_data=target_data, mask=mask).squeeze(2)
+        return node_repr, priority_ordered, orders, priority
+
+    def _p_sample_loop_with_priority(
+        self,
+        x_start: Tensor,
+        priority_start: Tensor,
+        deterministic: bool,
+    ) -> Tuple[Tensor, Tensor]:
+        device = x_start.device
+        batch = x_start.shape[0]
+        num_nodes = x_start.shape[1]
+        perm = torch.arange(num_nodes, device=device).expand(batch, -1)
+
+        for step in reversed(self.diffusion_utils.reverse_steps[1:]):
+            t = torch.full((batch,), step, device=device)
+            scores = self.reverse_model(
+                perm.unsqueeze(-2),
+                t,
+                x_start,
+                priority_start,
+            ).squeeze(-3)
+            sample_indices = PL.sample_generalized_PL(scores, deterministic=deterministic)
+            perm = _sd_utils.permute_int_list(sample_indices, perm)
+
+        result_x = _sd_utils.permute_embd(perm, x_start)
+        return result_x, perm
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        if graph is None:
+            node_repr = self._encode_raw_data(target_data, mask=mask)
+            priority = self._sample_priorities(
+                batch_size=node_repr.size(0),
+                num_nodes=node_repr.size(1),
+                device=node_repr.device,
+                dtype=node_repr.dtype,
+            )
+            was_training = self.reverse_model.training
+            self.reverse_model.eval()
+            try:
+                _, orders = self._p_sample_loop_with_priority(
+                    node_repr,
+                    priority_start=priority,
+                    deterministic=True,
+                )
+            finally:
+                self.reverse_model.train(was_training)
+            return {"orders": orders, "priority": priority}
+
+        node_repr, priority_ordered, clean_orders, priority = self._encode_priority_ordered_data(
+            target_data,
+            graph=graph,
+            mask=mask,
+        )
+        loss = self._training_losses_per_batch_with_priority(
+            node_repr,
+            priority_start=priority_ordered,
+        )
+        return {
+            "loss": loss,
+            "clean_orders": clean_orders,
+            "priority": priority,
+        }
+
+    def sample(self, target_data: Tensor, num_samples: int = 1, mask: Optional[Tensor] = None):
+        node_repr = self._encode_raw_data(target_data, mask=mask)
+        batch_size, num_nodes, d_model = node_repr.shape
+        priority = self._sample_priorities(
+            batch_size=num_samples * batch_size,
+            num_nodes=num_nodes,
+            device=node_repr.device,
+            dtype=node_repr.dtype,
+        )
+        node_repr = (
+            node_repr.unsqueeze(0)
+            .expand(num_samples, batch_size, num_nodes, d_model)
+            .reshape(num_samples * batch_size, num_nodes, d_model)
+        )
+        was_training = self.reverse_model.training
+        self.reverse_model.eval()
+        try:
+            _, orders = self._p_sample_loop_with_priority(
+                node_repr,
+                priority_start=priority,
+                deterministic=False,
+            )
+        finally:
+            self.reverse_model.train(was_training)
+        orders = orders.reshape(num_samples, batch_size, num_nodes)
+        priority = priority.reshape(num_samples, batch_size, num_nodes)
+        return orders, priority
