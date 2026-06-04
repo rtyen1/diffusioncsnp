@@ -198,7 +198,7 @@ def graph_id_from_dir(graph_dir: Path) -> int:
 
 
 def discover_h5_files(args: argparse.Namespace, sample_size: int) -> List[Tuple[Path, Dict[str, Any]]]:
-    root = Path(args.benchmark_root)
+    root = Path(args.benchmark_root).expanduser().resolve()
     if args.benchmark_kind == "random_gp":
         pattern = root / args.distribution / f"n_{sample_size}" / f"seed_{args.seed}" / "*.h5"
         fallback = {
@@ -267,14 +267,14 @@ def import_decoder_classes(source: str, bak_path: Path) -> Tuple[Any, Optional[A
 
 def load_model(
     *,
-    work_dir: Path,
+    models_root: Path,
     run_name: str,
     checkpoint: str,
     source: str,
     bak_path: Path,
     device: str,
 ) -> Tuple[Any, Dict[str, Any], Path]:
-    model_dir = work_dir / "experiments" / "causal_classification" / "models" / run_name
+    model_dir = models_root / run_name
     config_path = model_dir / "config.json"
     model_path = model_dir / checkpoint
     if not config_path.exists():
@@ -383,8 +383,13 @@ def method_specs(args: argparse.Namespace) -> List[Dict[str, str]]:
 
 
 def evaluate(args: argparse.Namespace) -> pd.DataFrame:
-    work_dir = Path(args.work_dir)
-    bak_path = Path(args.bak_path)
+    work_dir = Path(args.work_dir).expanduser().resolve()
+    models_root = (
+        Path(args.models_root).expanduser().resolve()
+        if args.models_root
+        else work_dir / "experiments" / "causal_classification" / "models"
+    )
+    bak_path = Path(args.bak_path).expanduser().resolve()
     result_summary = RunningSummary(
         [
             "method",
@@ -399,10 +404,11 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
     )
 
     loaded = []
+    print(f"models_root:    {models_root}")
     for spec in method_specs(args):
         print(f"Loading {spec['method']}: {spec['run_name']}/{spec['checkpoint']} source={spec['source']}")
         model, config, path = load_model(
-            work_dir=work_dir,
+            models_root=models_root,
             run_name=spec["run_name"],
             checkpoint=spec["checkpoint"],
             source=spec["source"],
@@ -415,7 +421,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
     print("=" * 100)
     print("Skeleton-L evaluation")
     print(f"benchmark_kind: {args.benchmark_kind}")
-    print(f"benchmark_root: {Path(args.benchmark_root).resolve()}")
+    print(f"benchmark_root: {Path(args.benchmark_root).expanduser().resolve()}")
     print(f"sample_sizes:   {parse_int_list(args.sample_sizes)}")
     print(f"threshold:      {args.threshold}")
     print(f"batch_size:     {args.batch_size}")
@@ -504,10 +510,11 @@ def main() -> None:
         type=str,
         default="/home/rtyen/projects/CausalStructureNeuralProcess-main/ml2_meta_causal_discovery",
     )
+    parser.add_argument("--models_root", type=str, default=None, help="Optional root containing model run directories.")
     parser.add_argument(
         "--bak_path",
         type=str,
-        default="/home/rtyen/projects/CausalStructureNeuralProcess-main/ml2_meta_causal_discovery/models/causaltransformernp.py.mask_version.bak",
+        default="ml2_meta_causal_discovery/models/causaltransformernp.py.mask_version.bak",
     )
 
     parser.add_argument("--bak_run_name", type=str, default="gp_4var_prob_bakL_100k")
@@ -545,7 +552,7 @@ def main() -> None:
         args.device = "cpu"
 
     df = evaluate(args)
-    results_dir = Path(args.results_dir)
+    results_dir = Path(args.results_dir).expanduser().resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     out_path = results_dir / args.summary_name
     df.to_csv(out_path, index=False)

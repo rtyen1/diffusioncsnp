@@ -71,8 +71,22 @@ def main(
     model_name: str,
     module: str,
     num_samples: int,
+    synth_data_root: str = None,
+    models_root: str = None,
 ):
-    data_dir = work_dir / "datasets/data/synth_training_data" / data_file
+    work_dir = work_dir.expanduser().resolve()
+    data_root = (
+        Path(synth_data_root).expanduser().resolve()
+        if synth_data_root
+        else work_dir / "datasets" / "data" / "synth_training_data"
+    )
+    model_root = (
+        Path(models_root).expanduser().resolve()
+        if models_root
+        else work_dir / "experiments" / "causal_classification" / "models"
+    )
+
+    data_dir = data_root / data_file
     # Get the training and validation datasets
     test_dir = data_dir / "test"
 
@@ -86,7 +100,7 @@ def main(
         )
 
     # Load the model
-    model_dir = work_dir / "experiments" / "causal_classification" / "models" / model_name
+    model_dir = model_root / model_name
     config_file = model_dir / "config.json"
     # Load the config file
     with open(config_file, "r") as f:
@@ -174,4 +188,6 @@ if __name__ == "__main__":
                 model_name=model,
                 module=args.decoder,
                 num_samples=num_samples,
+                synth_data_root=args.synth_data_root,
+                models_root=args.models_root,
             )

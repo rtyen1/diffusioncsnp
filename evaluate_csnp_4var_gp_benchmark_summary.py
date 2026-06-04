@@ -406,14 +406,14 @@ def import_decoder_classes(source: str, bak_path: Path) -> Tuple[Any, Optional[A
 
 def load_csnp_model(
     *,
-    csnp_work_dir: Path,
+    models_root: Path,
     run_name: str,
     checkpoint: str,
     device: str,
     source: str,
     bak_path: Path,
 ) -> Tuple[Any, Dict[str, Any], Path]:
-    model_dir = csnp_work_dir / "experiments" / "causal_classification" / "models" / run_name
+    model_dir = models_root / run_name
     config_path = model_dir / "config.json"
     model_path = model_dir / checkpoint
     if not config_path.exists():
@@ -754,6 +754,11 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame]:
         device = args.device
 
     csnp_work_dir = Path(args.csnp_work_dir).expanduser().resolve()
+    models_root = (
+        Path(args.models_root).expanduser().resolve()
+        if args.models_root
+        else csnp_work_dir / "experiments" / "causal_classification" / "models"
+    )
     bak_path = Path(args.bak_model_file).expanduser().resolve()
     sample_sizes = parse_int_list(args.sample_sizes)
     methods = set(parse_csv_list(args.methods))
@@ -762,6 +767,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame]:
     print("=" * 100)
     print("4var CSNP GP benchmark summary evaluation")
     print(f"benchmark_root: {Path(args.benchmark_root).expanduser().resolve()}")
+    print(f"models_root:    {models_root}")
     print(f"benchmark_kind: {args.benchmark_kind}")
     print(f"distribution:   {args.distribution}")
     print(f"fixed_generators: {args.fixed_generators}")
@@ -813,7 +819,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame]:
     for spec in model_specs:
         print(f"Loading {spec['method']}: {spec['run_name']}/{spec['checkpoint']} source={spec['source']}")
         model, config, model_path = load_csnp_model(
-            csnp_work_dir=csnp_work_dir,
+            models_root=models_root,
             run_name=spec["run_name"],
             checkpoint=spec["checkpoint"],
             device=device,
@@ -984,6 +990,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summary-only evaluation for 4var CSNP GP benchmark.")
 
     parser.add_argument("--csnp_work_dir", type=str, default="/home/rtyen/projects/CausalStructureNeuralProcess-main/ml2_meta_causal_discovery")
+    parser.add_argument("--models_root", type=str, default=None, help="Optional root containing model run directories.")
     parser.add_argument("--benchmark_root", type=str, default="benchmark_data_4var")
     parser.add_argument("--benchmark_kind", type=str, default="random_gp", choices=["random_gp", "fixed_graph"])
     parser.add_argument("--distribution", type=str, default="csnp_gp_4var_ERL0U1")

@@ -288,6 +288,7 @@ def make_loader(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train 4-node direct topological-order classifier.")
     parser.add_argument("--work_dir", type=str, default="/home/rtyen/projects/CausalStructureNeuralProcess-main/ml2_meta_causal_discovery")
+    parser.add_argument("--synth_data_root", type=str, default=None, help="Optional root containing synthetic training datasets.")
     parser.add_argument("--data_file", type=str, default="gp_4var_ERL0U1")
     parser.add_argument("--run_name", type=str, default="order_classifier_4var_d128")
     parser.add_argument("--results_dir", type=str, default="result/order_classifier_4var")
@@ -324,8 +325,13 @@ def main() -> None:
     if args.num_nodes != 4:
         raise ValueError("This upper-bound script is intended for exactly 4 nodes.")
 
-    work_dir = Path(args.work_dir)
-    data_root = work_dir / "datasets" / "data" / "synth_training_data" / args.data_file
+    work_dir = Path(args.work_dir).expanduser().resolve()
+    synth_data_root = (
+        Path(args.synth_data_root).expanduser().resolve()
+        if args.synth_data_root
+        else work_dir / "datasets" / "data" / "synth_training_data"
+    )
+    data_root = synth_data_root / args.data_file
     train_loader = make_loader(
         data_root / "train",
         batch_size=args.batch_size,
@@ -366,7 +372,7 @@ def main() -> None:
     print(f"Enumerating {orders.size(0)} orders:")
     print(orders.detach().cpu().tolist())
 
-    run_dir = Path(args.results_dir) / args.run_name
+    run_dir = Path(args.results_dir).expanduser().resolve() / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2)

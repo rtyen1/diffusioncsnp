@@ -32,7 +32,32 @@ from ml2_meta_causal_discovery.utils.train_classifier_model import \
     CausalClassifierTrainer
 
 
-def resolve_init_checkpoint(args, work_dir: Path):
+def optional_root(path_arg):
+    return Path(path_arg).expanduser().resolve() if path_arg else None
+
+
+def resolve_synth_data_root(args, work_dir: Path):
+    root = optional_root(args.synth_data_root)
+    if root is not None:
+        return root
+    return work_dir / "datasets" / "data" / "synth_training_data"
+
+
+def resolve_models_root(args, work_dir: Path):
+    root = optional_root(args.models_root)
+    if root is not None:
+        return root
+    return work_dir / "experiments" / "causal_classification" / "models"
+
+
+def resolve_results_root(args, work_dir: Path):
+    root = optional_root(args.results_root)
+    if root is not None:
+        return root
+    return work_dir / "experiments" / "causal_classification" / "results"
+
+
+def resolve_init_checkpoint(args, models_root: Path):
     if args.init_from_path:
         return Path(args.init_from_path).expanduser().resolve()
 
@@ -42,14 +67,7 @@ def resolve_init_checkpoint(args, work_dir: Path):
                 "Use both --init_from_run_name and --init_from_checkpoint, "
                 "or pass --init_from_path directly."
             )
-        return (
-            work_dir
-            / "experiments"
-            / "causal_classification"
-            / "models"
-            / args.init_from_run_name
-            / args.init_from_checkpoint
-        )
+        return models_root / args.init_from_run_name / args.init_from_checkpoint
 
     return None
 
@@ -102,8 +120,11 @@ def npf_main(args):
         config=vars(args),
     )
 
-    work_dir = Path(args.work_dir)
-    data_dir = work_dir / "datasets/data/synth_training_data" / args.data_file
+    work_dir = Path(args.work_dir).expanduser().resolve()
+    synth_data_root = resolve_synth_data_root(args, work_dir)
+    models_root = resolve_models_root(args, work_dir)
+    results_root = resolve_results_root(args, work_dir)
+    data_dir = synth_data_root / args.data_file
     # Get the training and validation datasets
     train_dir = data_dir / "train"
     train_files = list(train_dir.iterdir())
@@ -186,13 +207,7 @@ def npf_main(args):
         weight_decay=args.weight_decay,
     )
 
-    save_dir = (
-        work_dir
-        / "experiments"
-        / "causal_classification"
-        / "models"
-        / args.run_name
-    )
+    save_dir = models_root / args.run_name
 
     # Function to convert dtype objects to serializable format
     def convert_dtype(obj):
@@ -206,7 +221,7 @@ def npf_main(args):
         json.dump(TNPD_KWARGS, f, default=convert_dtype)
 
     model = model_1d()
-    init_checkpoint = resolve_init_checkpoint(args, work_dir=work_dir)
+    init_checkpoint = resolve_init_checkpoint(args, models_root=models_root)
     if init_checkpoint is not None:
         load_initial_weights(
             model=model,
@@ -244,7 +259,7 @@ def npf_main(args):
             num_samples=500,
         )
 
-    result_folder = work_dir / "experiments" / "causal_classification" / "results"
+    result_folder = results_root
     result_folder.mkdir(parents=True, exist_ok=True)
     # Save the results
     with open(result_folder / f"{args.run_name}.json", "w") as f:

@@ -33,8 +33,18 @@ def npf_main(args):
         config=vars(args),
     )
 
-    work_dir = Path(args.work_dir)
-    data_dir = work_dir / "datasets/data/synth_training_data" / "finetune"
+    work_dir = Path(args.work_dir).expanduser().resolve()
+    synth_data_root = (
+        Path(args.synth_data_root).expanduser().resolve()
+        if args.synth_data_root
+        else work_dir / "datasets" / "data" / "synth_training_data"
+    )
+    models_root = (
+        Path(args.models_root).expanduser().resolve()
+        if args.models_root
+        else work_dir / "experiments" / "causal_classification" / "models"
+    )
+    data_dir = synth_data_root / "finetune"
     # Get the training and validation datasets
     train_dir = data_dir
     with open(train_dir / "X_train.pickle", "rb") as f:
@@ -111,13 +121,7 @@ def npf_main(args):
         weight_decay=args.weight_decay,
     )
 
-    save_dir = (
-        work_dir
-        / "experiments"
-        / "causal_classification"
-        / "models"
-        / args.run_name
-    )
+    save_dir = models_root / args.run_name
 
     # Function to convert dtype objects to serializable format
     def convert_dtype(obj):
@@ -132,7 +136,7 @@ def npf_main(args):
 
     # Load the model
     model = model_1d()
-    model_dir = work_dir / "experiments" / "causal_classification" / "models" / "lab_run_shuffle"
+    model_dir = models_root / "lab_run_shuffle"
     model.load_state_dict(torch.load(model_dir / "model_1.pt"))
     model = model.to("cuda")
 

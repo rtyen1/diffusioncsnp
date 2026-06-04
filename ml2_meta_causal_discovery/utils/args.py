@@ -19,6 +19,35 @@ def retun_default_args(parser):
         help="Folder where the Neural Process Family is stored.",
     )
     parser.add_argument(
+        "--synth_data_root",
+        type=str,
+        default=None,
+        help=(
+            "Optional root for synthetic training data. If set, data is read from "
+            "<synth_data_root>/<data_file> instead of "
+            "<work_dir>/datasets/data/synth_training_data/<data_file>."
+        ),
+    )
+    parser.add_argument(
+        "--models_root",
+        type=str,
+        default=None,
+        help=(
+            "Optional root for model checkpoints. If set, models are read/written "
+            "under <models_root>/<run_name> instead of "
+            "<work_dir>/experiments/causal_classification/models/<run_name>."
+        ),
+    )
+    parser.add_argument(
+        "--results_root",
+        type=str,
+        default=None,
+        help=(
+            "Optional root for training result JSON files. If set, results are "
+            "written there instead of <work_dir>/experiments/causal_classification/results."
+        ),
+    )
+    parser.add_argument(
         "--learning_rate",
         "-lr",
         type=float,
