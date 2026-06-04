@@ -182,3 +182,6 @@ tmp*/
 gs_opposite_two_seed0_strong/
 *.docx
 ~$*
+
+result/
+ml2_meta_causal_discovery/experiments/causal_classification/models/topo_priority_gp4_d128_rev027_L7_E120/
