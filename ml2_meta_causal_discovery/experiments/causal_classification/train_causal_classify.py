@@ -242,6 +242,9 @@ def npf_main(args):
         save_dir=save_dir,
         sample_size_min=args.sample_size_min,
         sample_size_max=args.sample_size_max,
+        eval_batch_size=args.eval_batch_size,
+        eval_every_epochs=args.eval_every_epochs,
+        eval_max_batches=args.eval_max_batches,
     )
     trainer.train()
     if args.decoder in topo_decoders:

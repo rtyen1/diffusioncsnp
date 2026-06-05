@@ -64,6 +64,9 @@ class CausalClassifierTrainer:
         save_dir: Path,
         sample_size_min: int,
         sample_size_max: int,
+        eval_batch_size: int = 4,
+        eval_every_epochs: int = 1,
+        eval_max_batches: int = None,
         scheduler: th.optim.lr_scheduler = None,
         use_wandb: bool = True,
     ):
@@ -80,6 +83,9 @@ class CausalClassifierTrainer:
         self.save_dir = save_dir
         self.sample_size_min = sample_size_min
         self.sample_size_max = sample_size_max
+        self.eval_batch_size = eval_batch_size
+        self.eval_every_epochs = eval_every_epochs
+        self.eval_max_batches = eval_max_batches
         self.scheduler = scheduler
         self.use_wandb = use_wandb
 
@@ -101,13 +107,13 @@ class CausalClassifierTrainer:
             collate_fn=collator(),
         )
         self.val_loader = th.utils.data.DataLoader(
-            self.validation_dataset, batch_size=4, shuffle=True,
+            self.validation_dataset, batch_size=self.eval_batch_size, shuffle=True,
             num_workers=self.num_workers, pin_memory=True,
             persistent_workers=False if self.num_workers == 0 else True,
             collate_fn=collator(),
         )
         self.test_loader = th.utils.data.DataLoader(
-            self.test_dataset, batch_size=4, shuffle=True,
+            self.test_dataset, batch_size=self.eval_batch_size, shuffle=True,
             num_workers=self.num_workers, pin_memory=True,
             persistent_workers=False if self.num_workers == 0 else True,
             collate_fn=collator(),
@@ -138,6 +144,8 @@ class CausalClassifierTrainer:
             self.model.to(dtype)
             all_loss = 0
             for i, data in enumerate(tqdm(test_loader, desc="Testing")):
+                if self.eval_max_batches is not None and i >= self.eval_max_batches:
+                    break
                 # Get the inputs and targets
                 inputs, targets, attention_mask = data
                 targets = targets.to("cuda", dtype=dtype)
@@ -175,7 +183,11 @@ class CausalClassifierTrainer:
                     else:
                         metric_dict.update(result)
             # Log the test loss
-            loss = all_loss / len(test_loader.dataset)
+            n_eval = len(test_loader.dataset)
+            if self.eval_max_batches is not None:
+                n_eval = min(n_eval, self.eval_max_batches * test_loader.batch_size)
+            n_eval = max(n_eval, 1)
+            loss = all_loss / n_eval
             metric_dict.update(
                 {
                     "test_loss": loss,
@@ -194,6 +206,8 @@ class CausalClassifierTrainer:
         all_loss = 0
         all_preds = 0
         for i, data in enumerate(tqdm(val_loader, desc="Validation")):
+            if self.eval_max_batches is not None and i >= self.eval_max_batches:
+                break
             # Get the inputs and targets
             inputs, targets, attention_mask = data
             targets = targets.to("cuda", dtype=dtype)
@@ -213,7 +227,11 @@ class CausalClassifierTrainer:
             # all_preds += th.sum(pred == flat_target).cpu().item()
         # Log the validation loss
         # accuracy = all_preds / len(val_loader.dataset)
-        loss = all_loss / len(val_loader.dataset)
+        n_eval = len(val_loader.dataset)
+        if self.eval_max_batches is not None:
+            n_eval = min(n_eval, self.eval_max_batches * val_loader.batch_size)
+        n_eval = max(n_eval, 1)
+        loss = all_loss / n_eval
         metric_dict.update(
             {
                 "val_loss": loss,
@@ -303,8 +321,16 @@ class CausalClassifierTrainer:
                 epoch=epoch,
                 lr_warmup_steps=lr_warmup_steps,
             )
-            metric_dict = self.validate_single_epoch(self.val_loader, metric_dict)
-            metric_dict = self.test_single_epoch(self.test_loader, metric_dict)
+            should_eval = (
+                self.eval_every_epochs > 0
+                and (
+                    (epoch + 1) % self.eval_every_epochs == 0
+                    or epoch == self.epochs - 1
+                )
+            )
+            if should_eval:
+                metric_dict = self.validate_single_epoch(self.val_loader, metric_dict)
+                metric_dict = self.test_single_epoch(self.test_loader, metric_dict)
             # Step the scheduler after each epoch
             if self.scheduler is not None:
                 self.scheduler.step()

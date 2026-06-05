@@ -76,6 +76,27 @@ def retun_default_args(parser):
         help="Batch size for generator.",
     )
     parser.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=4,
+        help="Batch size for validation/test loaders. Default keeps the original behavior.",
+    )
+    parser.add_argument(
+        "--eval_every_epochs",
+        type=int,
+        default=1,
+        help=(
+            "Run validation/test every N epochs. Default 1 keeps the original "
+            "behavior. Set 0 to skip epoch-end validation/test during training."
+        ),
+    )
+    parser.add_argument(
+        "--eval_max_batches",
+        type=int,
+        default=None,
+        help="Optional cap on validation/test batches per epoch. Default uses the full split.",
+    )
+    parser.add_argument(
         "--max_epochs",
         "-me",
         type=int,
