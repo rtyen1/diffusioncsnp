@@ -497,17 +497,60 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
         else:
             valid_nodes = mask[:, -1, :] > -1e20
 
-        orders = torch.empty((batch_size, num_nodes), dtype=torch.long, device=graph.device)
-        for b in range(batch_size):
-            valid_idx = torch.nonzero(valid_nodes[b], as_tuple=False).flatten()
-            invalid_idx = torch.nonzero(~valid_nodes[b], as_tuple=False).flatten()
-            subgraph = graph[b][valid_idx][:, valid_idx]
-            subpriority = priority[b][valid_idx]
-            local_order = priority_kahn_topological_sort(subgraph, subpriority)
-            ordered_valid = valid_idx[
-                torch.tensor(local_order, dtype=torch.long, device=graph.device)
-            ]
-            orders[b] = torch.cat([ordered_valid, invalid_idx], dim=0)
+        return self._batched_priority_kahn_topological_orders(
+            graph=graph,
+            priority=priority,
+            valid_nodes=valid_nodes,
+        )
+
+    @staticmethod
+    def _batched_priority_kahn_topological_orders(
+        graph: Tensor,
+        priority: Tensor,
+        valid_nodes: Tensor,
+    ) -> Tensor:
+        """
+        Batched priority Kahn topological sort.
+
+        This is equivalent to priority_kahn_topological_sort on each valid
+        subgraph: among currently available source nodes, pick the node with
+        the smallest priority, breaking exact ties by node index. Invalid padded
+        nodes are appended at the end in ascending node order.
+        """
+        batch_size, num_nodes, _ = graph.shape
+        device = graph.device
+        node_ids = torch.arange(num_nodes, device=device)
+        batch_ids = torch.arange(batch_size, device=device)
+
+        valid_nodes = valid_nodes.to(torch.bool)
+        active_edges = (graph > 0.5) & valid_nodes.unsqueeze(2) & valid_nodes.unsqueeze(1)
+        indegree = active_edges.to(torch.long).sum(dim=1)
+        selected = ~valid_nodes.clone()
+        valid_counts = valid_nodes.to(torch.long).sum(dim=1)
+
+        orders = torch.empty((batch_size, num_nodes), dtype=torch.long, device=device)
+        for step in range(num_nodes):
+            active_batch = step < valid_counts
+            available = valid_nodes & ~selected & (indegree == 0)
+            score = priority.masked_fill(~available, float("inf"))
+            choice = score.argmin(dim=1)
+
+            active_ids = batch_ids[active_batch]
+            active_choice = choice[active_batch]
+            orders[active_ids, step] = active_choice
+            selected[active_ids, active_choice] = True
+            indegree[active_ids] -= active_edges[active_ids, active_choice].to(torch.long)
+
+        invalid_scores = torch.where(
+            ~valid_nodes,
+            node_ids.view(1, num_nodes).expand(batch_size, -1),
+            torch.full((batch_size, num_nodes), num_nodes, dtype=torch.long, device=device),
+        )
+        invalid_sorted = invalid_scores.sort(dim=1).values
+        pos = node_ids.view(1, num_nodes).expand(batch_size, -1)
+        invalid_mask = pos >= valid_counts.unsqueeze(1)
+        invalid_pos = (pos - valid_counts.unsqueeze(1)).clamp_min(0)
+        orders[invalid_mask] = invalid_sorted.gather(1, invalid_pos)[invalid_mask]
         return orders
 
     @staticmethod
