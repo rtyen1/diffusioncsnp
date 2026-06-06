@@ -270,6 +270,12 @@ def retun_default_args(parser):
         help="Initial log-scale for priority score bias in --decoder topo_priority_diffusion.",
     )
     parser.add_argument(
+        "--topo_bfloat16",
+        default=False,
+        action="store_true",
+        help="Train topo_diffusion/topo_priority_diffusion in bfloat16 instead of float32.",
+    )
+    parser.add_argument(
         "--use_positional_encoding",
         "-upe",
         default=False,

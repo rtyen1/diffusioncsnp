@@ -483,7 +483,9 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
         )
 
     def _sample_priorities(self, batch_size: int, num_nodes: int, device, dtype) -> Tensor:
-        return torch.rand((batch_size, num_nodes), device=device, dtype=dtype)
+        # Keep exogenous priorities in fp32 even when the denoiser uses bf16.
+        # This avoids unnecessary ties from low-precision priority sampling.
+        return torch.rand((batch_size, num_nodes), device=device, dtype=torch.float32)
 
     def _sample_batch_priority_topological_orders(
         self,

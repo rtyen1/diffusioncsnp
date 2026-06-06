@@ -139,7 +139,8 @@ def npf_main(args):
     )
 
     topo_decoders = {"topo_diffusion", "topo_priority_diffusion"}
-    model_dtype = torch.float32 if args.decoder in topo_decoders else torch.bfloat16
+    use_bfloat16 = args.decoder not in topo_decoders or args.topo_bfloat16
+    model_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
 
     TNPD_KWARGS = dict(
         d_model=args.dim_model,
@@ -238,7 +239,7 @@ def npf_main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         lr_warmup_ratio=args.lr_warmup_ratio, # Should be around 10% of the total steps
-        bfloat16=args.decoder not in topo_decoders,
+        bfloat16=use_bfloat16,
         save_dir=save_dir,
         sample_size_min=args.sample_size_min,
         sample_size_max=args.sample_size_max,
