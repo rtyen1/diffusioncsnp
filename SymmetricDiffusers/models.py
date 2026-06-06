@@ -186,7 +186,7 @@ class PositionalEncoding(nn.Module):
             x: Tensor, shape [batch_size, seq_len, embedding_dim]
         """
         # Add positional encoding to the input embedding
-        x = x + self.pe[:, : x.size(1), :].to(x.device)
+        x = x + self.pe[:, : x.size(1), :].to(device=x.device, dtype=x.dtype)
         return self.dropout(x)
 
 
@@ -344,7 +344,7 @@ class EncoderLayers(nn.Module):
         for i, layer in enumerate(self.encoder_layers):
             if i == self.nlayers - 1:  # last layer, self attention
                 if self.d_out_adjust == "square":
-                    pad = torch.zeros(batch, n, self.d_model, device=device)
+                    pad = torch.zeros(batch, n, self.d_model, device=device, dtype=embd.dtype)
                     embd = torch.cat([embd, pad], dim=-2)  # [NTb, 2n, d_model]
                     embd = self.pos_encoder(embd)
                 embd = layer(embd + time_embd, src_mask=attn_mask)
@@ -370,16 +370,16 @@ class EncoderLayers(nn.Module):
         # create attention mask
         attn_mask = None
         if self.d_out_adjust == "square":
-            mask_up_right = torch.full((n, n), float("-inf"), device=device)
-            mask_bottom_right = torch.triu(torch.full((n, n), float("-inf"), device=device))
+            mask_up_right = torch.full((n, n), float("-inf"), device=device, dtype=embd.dtype)
+            mask_bottom_right = torch.triu(torch.full((n, n), float("-inf"), device=device, dtype=embd.dtype))
             mask_right = torch.cat([mask_up_right, mask_bottom_right], dim=0)
-            mask_left = torch.zeros((2 * n, n), device=device)
+            mask_left = torch.zeros((2 * n, n), device=device, dtype=embd.dtype)
             attn_mask = torch.cat([mask_left, mask_right], dim=-1)
 
         # If not using cross attn, we pad the input to length 2n
         # If we are using cross attn, then we pad at the last encoder layer
         if self.d_out_adjust == "square" and (not self.encoder == "cross"):
-            pad = torch.zeros(batch, n, self.d_model, device=device)
+            pad = torch.zeros(batch, n, self.d_model, device=device, dtype=embd.dtype)
             embd = torch.cat([embd, pad], dim=-2)  # [NTb, 2n, d_model]
 
         embd = self.pos_encoder(embd)

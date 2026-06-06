@@ -239,6 +239,13 @@ class CausalTopoOrderDiffusion(CausalTNPEncoder):
             num_layers=num_layers_decoder,
             dropout=dropout,
         )
+        factory_kwargs = {}
+        if device is not None:
+            factory_kwargs["device"] = device
+        if dtype is not None:
+            factory_kwargs["dtype"] = dtype
+        if factory_kwargs:
+            self.reverse_model.to(**factory_kwargs)
         self.diffusion_utils = DiffusionUtils(
             num_timesteps=topo_num_timesteps,
             sample_N=topo_sample_N,
@@ -320,7 +327,7 @@ class CausalTopoOrderDiffusion(CausalTNPEncoder):
         )
 
         p_log_probs = self.diffusion_utils.p_log_cond_prob(
-            scores,
+            scores.float(),
             perm_tm1=perm_seq_no_end,
             perm_t=perm_seq_no_start,
         )
@@ -481,6 +488,13 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
             dropout=dropout,
             priority_scale_init=topo_priority_scale_init,
         )
+        factory_kwargs = {}
+        if device is not None:
+            factory_kwargs["device"] = device
+        if dtype is not None:
+            factory_kwargs["dtype"] = dtype
+        if factory_kwargs:
+            self.reverse_model.to(**factory_kwargs)
 
     def _sample_priorities(self, batch_size: int, num_nodes: int, device, dtype) -> Tensor:
         # Keep exogenous priorities in fp32 even when the denoiser uses bf16.
@@ -583,7 +597,7 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
         )
 
         p_log_probs = self.diffusion_utils.p_log_cond_prob(
-            scores,
+            scores.float(),
             perm_tm1=perm_seq_no_end,
             perm_t=perm_seq_no_start,
         )

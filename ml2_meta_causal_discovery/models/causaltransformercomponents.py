@@ -346,6 +346,13 @@ class CausalTNPEncoder(nn.Module):
             depth=emb_depth,
             use_bias=mlp_use_bias
         )
+        factory_kwargs = {}
+        if device is not None:
+            factory_kwargs["device"] = device
+        if dtype is not None:
+            factory_kwargs["dtype"] = dtype
+        if factory_kwargs:
+            self.embedder.to(**factory_kwargs)
         module = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -373,6 +380,8 @@ class CausalTNPEncoder(nn.Module):
         self.use_positional_encoding = use_positional_encoding
         if use_positional_encoding:
             self.positional_encoding = PositionalEncoding(d_model=d_model // 2, dropout=0.0, max_len=num_nodes)
+            if factory_kwargs:
+                self.positional_encoding.to(**factory_kwargs)
 
         self.avici_summary = avici_summary
 
