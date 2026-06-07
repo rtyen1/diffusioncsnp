@@ -85,7 +85,8 @@ def load_initial_weights(model, checkpoint_path: Path, device: str):
 
 def evaluate_topo_order_model(trainer, num_samples: int = 1):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = trainer.model.to(device)
+    dtype = torch.bfloat16 if getattr(trainer, "bfloat16", False) else torch.float32
+    model = trainer.model.to(device=device, dtype=dtype)
     model.eval()
     all_edge_acc = []
     all_topo_valid = []
@@ -93,10 +94,10 @@ def evaluate_topo_order_model(trainer, num_samples: int = 1):
     with torch.no_grad():
         for data in trainer.test_loader:
             inputs, targets, attention_mask = data
-            inputs = inputs.to(device, dtype=torch.float32)
+            inputs = inputs.to(device, dtype=dtype)
             targets = targets.to(device, dtype=torch.float32)
             if attention_mask is not None:
-                attention_mask = attention_mask.to(device, dtype=torch.float32)
+                attention_mask = attention_mask.to(device, dtype=dtype)
             inputs = (inputs - inputs.mean(dim=1, keepdim=True)) / inputs.std(dim=1, keepdim=True)
             orders, _ = model.sample(inputs, num_samples=num_samples, mask=attention_mask)
             edge_acc = model.order_edge_precedence_accuracy(orders[0], targets)
