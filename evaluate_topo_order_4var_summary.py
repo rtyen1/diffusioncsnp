@@ -293,8 +293,10 @@ def sample_topo_diffusion_orders(
     device: str,
     standardize: bool,
     deterministic: bool = False,
-) -> np.ndarray:
+    return_priority: bool = False,
+) -> Any:
     inputs = encode_input(data, device=device, standardize=standardize)
+    priority_np: Optional[np.ndarray] = None
     with th.no_grad():
         node_repr = model._encode_raw_data(inputs, mask=None)
         was_training = model.reverse_model.training
@@ -302,11 +304,13 @@ def sample_topo_diffusion_orders(
         try:
             if hasattr(model, "_p_sample_loop_with_priority"):
                 batch_size, num_nodes, d_model = node_repr.shape
-                priority = th.rand(
-                    (num_order_samples * batch_size, num_nodes),
+                priority = model._sample_priorities(
+                    batch_size=num_order_samples * batch_size,
+                    num_nodes=num_nodes,
                     device=node_repr.device,
                     dtype=node_repr.dtype,
                 )
+                priority_np = priority.detach().cpu().numpy().astype(np.float32)
                 node_repr = (
                     node_repr.unsqueeze(0)
                     .expand(num_order_samples, batch_size, num_nodes, d_model)
@@ -327,7 +331,70 @@ def sample_topo_diffusion_orders(
         finally:
             model.reverse_model.train(was_training)
     # Batched p_sample_loop returns [num_samples, d], root-to-leaf.
-    return orders.detach().cpu().numpy().astype(int)
+    orders_np = orders.detach().cpu().numpy().astype(int)
+    if return_priority:
+        return orders_np, priority_np
+    return orders_np
+
+
+def priority_kahn_order_np(adj: np.ndarray, priority: np.ndarray) -> np.ndarray:
+    """Unique root-to-leaf topological order C_u(G), smaller u picked earlier."""
+    graph = remove_diag(adj).astype(int)
+    priority = np.asarray(priority, dtype=np.float64)
+    num_nodes = graph.shape[0]
+    indegree = graph.sum(axis=0).astype(int).tolist()
+    available = [i for i in range(num_nodes) if indegree[i] == 0]
+    order: List[int] = []
+
+    while available:
+        node = min(available, key=lambda i: (float(priority[i]), i))
+        available.remove(node)
+        order.append(node)
+        for child in np.flatnonzero(graph[node]):
+            indegree[int(child)] -= 1
+            if indegree[int(child)] == 0:
+                available.append(int(child))
+
+    if len(order) != num_nodes:
+        raise ValueError("Graph is cyclic; cannot compute priority topological order.")
+    return np.asarray(order, dtype=int)
+
+
+def summarize_priority_order_match(
+    adj: np.ndarray,
+    pred_orders: np.ndarray,
+    priorities: np.ndarray,
+) -> Dict[str, float]:
+    """Compare predicted orders with the priority-label orders C_u(G)."""
+    pred_orders = np.asarray(pred_orders, dtype=int)
+    priorities = np.asarray(priorities, dtype=np.float64)
+    target_orders = np.stack(
+        [priority_kahn_order_np(adj, priorities[i]) for i in range(pred_orders.shape[0])],
+        axis=0,
+    )
+    exact = np.all(pred_orders == target_orders, axis=1)
+    position_acc = np.mean(pred_orders == target_orders, axis=1)
+
+    num_samples, num_nodes = pred_orders.shape
+    pair_accs: List[float] = []
+    for sample_idx in range(num_samples):
+        pred_pos = np.empty(num_nodes, dtype=int)
+        target_pos = np.empty(num_nodes, dtype=int)
+        pred_pos[pred_orders[sample_idx]] = np.arange(num_nodes)
+        target_pos[target_orders[sample_idx]] = np.arange(num_nodes)
+        correct = 0
+        total = 0
+        for i in range(num_nodes):
+            for j in range(i + 1, num_nodes):
+                correct += int((pred_pos[i] < pred_pos[j]) == (target_pos[i] < target_pos[j]))
+                total += 1
+        pair_accs.append(correct / total if total else 1.0)
+
+    return {
+        "priority_exact_match": float(np.mean(exact)),
+        "priority_position_accuracy": float(np.mean(position_acc)),
+        "priority_pairwise_accuracy": float(np.mean(pair_accs)),
+    }
 
 
 def is_valid_topological_order(adj: np.ndarray, order: np.ndarray) -> Tuple[bool, int, float]:
@@ -559,6 +626,27 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                                     standardize=args.standardize,
                                 )
                             elif kind in {"topo_diffusion_sample", "topo_diffusion_deterministic"}:
+                                if hasattr(model, "_p_sample_loop_with_priority"):
+                                    orders, priorities = sample_topo_diffusion_orders(
+                                        model=model,
+                                        data=data,
+                                        num_order_samples=args.num_order_samples,
+                                        device=device,
+                                        standardize=args.standardize,
+                                        deterministic=(kind == "topo_diffusion_deterministic"),
+                                        return_priority=True,
+                                    )
+                                    metrics = summarize_orders(true_dag, orders)
+                                    if priorities is not None:
+                                        metrics.update(
+                                            summarize_priority_order_match(
+                                                true_dag,
+                                                orders,
+                                                priorities,
+                                            )
+                                        )
+                                    summary.add_ok(group, metrics)
+                                    continue
                                 orders = sample_topo_diffusion_orders(
                                     model=model,
                                     data=data,

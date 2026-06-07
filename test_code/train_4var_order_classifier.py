@@ -63,14 +63,13 @@ def valid_order_mask(graph: Tensor, orders: Tensor) -> Tensor:
     positions[order_ids, orders] = pos_ids
 
     valid = torch.ones((batch_size, num_orders), dtype=torch.bool, device=graph.device)
-    edge_batch, edge_parent, edge_child = torch.nonzero(graph, as_tuple=True)
-    if edge_batch.numel() == 0:
-        return valid
-
-    parent_pos = positions[:, edge_parent].transpose(0, 1)
-    child_pos = positions[:, edge_child].transpose(0, 1)
-    edge_valid = parent_pos < child_pos
-    valid[edge_batch] &= edge_valid
+    for b in range(batch_size):
+        edges = torch.nonzero(graph[b], as_tuple=False)
+        if edges.numel() == 0:
+            continue
+        parent_pos = positions[:, edges[:, 0]]
+        child_pos = positions[:, edges[:, 1]]
+        valid[b] = (parent_pos < child_pos).all(dim=1)
     return valid
 
 
