@@ -18,12 +18,14 @@ def hpc_classify_main(args):
     function_gen = "gp"
     usecase = args.folder_name
     # Rest of the code...
-    num_samples = 1000
+    num_samples = args.num_samples
     graph_type = ["ER"]
     exp_edges_lower = args.exp_edges_lower * num_vars
     exp_edges_upper = args.exp_edges_upper * num_vars
 
-    if exp_edges_upper == exp_edges_lower:
+    if args.dataset_name is not None:
+        name = args.dataset_name
+    elif exp_edges_upper == exp_edges_lower:
         name = f"{function_gen}_{num_vars}var_ER{args.exp_edges_lower}"
     else:
         name = f"{function_gen}_{num_vars}var_ERL{args.exp_edges_lower}U{args.exp_edges_upper}"
@@ -53,6 +55,7 @@ def hpc_classify_main(args):
             dset = f.create_dataset("label", data=causal_graphs)
         with open(save_folder / "graph_args.json", "w") as f:
             graph_args = {
+                "dataset_name": name,
                 "graph_type": graph_type,
                 "graph_degrees_upper": exp_edges_upper,
                 "graph_degrees_lower": exp_edges_lower,
@@ -123,6 +126,20 @@ if __name__ == "__main__":
         "-bs",
         type=int,
         default=50000,
+    )
+    parser.add_argument(
+        "--num_samples",
+        "-ns",
+        type=int,
+        default=1000,
+        help="Number of observations per generated dataset.",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        "-dn",
+        type=str,
+        default=None,
+        help="Optional dataset folder name. Defaults to the legacy automatic name.",
     )
     parser.add_argument(
         "--exp_edges_upper",
