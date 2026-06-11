@@ -461,7 +461,7 @@ class CausalProbabilisticDecoder(CausalTNPEncoder):
             L_param = self.L_param(L_rep, padding_mask=mask)
             # Q_param = self.Q_param(Q_rep)
         # Symmetrize L_param for permutation equivariance
-        #L_param = (L_param + L_param.transpose(1, 2)) / 2
+        L_param = (L_param + L_param.transpose(1, 2)) / 2
         return L_param, Q_rep
 
     def calculate_loss(self, probs, target):
@@ -559,30 +559,6 @@ class CausalProbabilisticDecoder(CausalTNPEncoder):
         # # All matrices
         # extract mask for variable node size
         # tril doesnt work on some dtypes
-
-        tri_mask = torch.tril(
-            torch.ones(
-                (self.num_nodes, self.num_nodes),
-                device=perm.device,
-                dtype=torch.float32,
-            ),
-            diagonal=-1,
-        ).to(perm.dtype)
-
-        tri_mask = tri_mask[: representation.size(1), : representation.size(1)]
-
-        lower_probs = torch.sigmoid(L_param) * tri_mask[None, :, :]
-
-        all_probs = torch.einsum(
-            "sbij,bjk,sbkl->sbil",
-            perm,
-            lower_probs,
-            perm_inv,
-        )
-
-        return all_probs
-
-
         mask = torch.tril(
             torch.ones(
                 (self.num_nodes, self.num_nodes),

@@ -304,6 +304,12 @@ def retun_default_args(parser):
         help="Decay learning rate",
     )
     parser.add_argument(
+        "--use_learning_rate_decay",
+        default=False,
+        action="store_true",
+        help="Use ExponentialLR with --learning_rate_decay during training.",
+    )
+    parser.add_argument(
         "--init_from_run_name",
         default=None,
         type=str,
@@ -320,6 +326,24 @@ def retun_default_args(parser):
         default=None,
         type=str,
         help="Optional direct checkpoint path. Overrides init_from_run_name/checkpoint if set.",
+    )
+    parser.add_argument(
+        "--resume_from_run_name",
+        default=None,
+        type=str,
+        help="Optional existing run name to resume full training state from.",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        default=None,
+        type=str,
+        help="Full checkpoint filename inside --resume_from_run_name, e.g. checkpoint_9.pt.",
+    )
+    parser.add_argument(
+        "--resume_from_path",
+        default=None,
+        type=str,
+        help="Optional direct full checkpoint path. Overrides resume_from_run_name/checkpoint if set.",
     )
     args = parser.parse_args()
     return args

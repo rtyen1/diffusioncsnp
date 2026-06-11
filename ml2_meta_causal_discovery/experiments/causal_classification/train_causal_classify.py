@@ -72,15 +72,70 @@ def resolve_init_checkpoint(args, models_root: Path):
     return None
 
 
+def resolve_resume_checkpoint(args, models_root: Path):
+    if args.resume_from_path:
+        return Path(args.resume_from_path).expanduser().resolve()
+
+    if args.resume_from_run_name or args.resume_from_checkpoint:
+        if not args.resume_from_run_name or not args.resume_from_checkpoint:
+            raise ValueError(
+                "Use both --resume_from_run_name and --resume_from_checkpoint, "
+                "or pass --resume_from_path directly."
+            )
+        return models_root / args.resume_from_run_name / args.resume_from_checkpoint
+
+    return None
+
+
+def torch_load(path: Path, device: str, weights_only: bool = False):
+    try:
+        return torch.load(path, map_location=device, weights_only=weights_only)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
 def load_initial_weights(model, checkpoint_path: Path, device: str):
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Initial checkpoint not found: {checkpoint_path}")
-    try:
-        state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    except TypeError:
-        state_dict = torch.load(checkpoint_path, map_location=device)
+    state_dict = torch_load(checkpoint_path, device=device, weights_only=True)
+    if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
     model.load_state_dict(state_dict)
     print(f"Initialized model weights from: {checkpoint_path}")
+
+
+def load_training_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    checkpoint_path: Path,
+    device: str,
+):
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+    checkpoint = torch_load(checkpoint_path, device=device, weights_only=False)
+    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        raise ValueError(
+            "Resume checkpoint must be a full training checkpoint with "
+            "'model_state_dict', not a raw model state_dict."
+        )
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    scheduler_state = checkpoint.get("scheduler_state_dict")
+    if scheduler is not None and scheduler_state is not None:
+        scheduler.load_state_dict(scheduler_state)
+    elif scheduler_state is not None:
+        print("Resume checkpoint has scheduler state, but no scheduler is enabled.")
+
+    start_epoch = int(checkpoint.get("epoch", 0))
+    current_lr = optimizer.param_groups[0]["lr"]
+    print(
+        f"Resumed full training state from: {checkpoint_path} "
+        f"(start_epoch={start_epoch}, lr={current_lr})"
+    )
+    return start_epoch
 
 
 def evaluate_topo_order_model(trainer, num_samples: int = 1):
@@ -223,8 +278,31 @@ def npf_main(args):
         json.dump(TNPD_KWARGS, f, default=convert_dtype)
 
     model = model_1d()
+    optimizer = optimiser_part_init(model.parameters())
+    scheduler = (
+        torch.optim.lr_scheduler.ExponentialLR(
+            optimizer,
+            gamma=args.learning_rate_decay,
+        )
+        if args.use_learning_rate_decay
+        else None
+    )
+
     init_checkpoint = resolve_init_checkpoint(args, models_root=models_root)
-    if init_checkpoint is not None:
+    resume_checkpoint = resolve_resume_checkpoint(args, models_root=models_root)
+    if init_checkpoint is not None and resume_checkpoint is not None:
+        raise ValueError("Use either --init_from_* or --resume_from_*, not both.")
+
+    start_epoch = 0
+    if resume_checkpoint is not None:
+        start_epoch = load_training_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            checkpoint_path=resume_checkpoint,
+            device=TNPD_KWARGS["device"],
+        )
+    elif init_checkpoint is not None:
         load_initial_weights(
             model=model,
             checkpoint_path=init_checkpoint,
@@ -235,7 +313,7 @@ def npf_main(args):
         validation_dataset=val_dataset,
         test_dataset=val_dataset,
         model=model,
-        optimizer=optimiser_part_init(model.parameters()),
+        optimizer=optimizer,
         epochs=args.max_epochs,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -247,6 +325,8 @@ def npf_main(args):
         eval_batch_size=args.eval_batch_size,
         eval_every_epochs=args.eval_every_epochs,
         eval_max_batches=args.eval_max_batches,
+        scheduler=scheduler,
+        start_epoch=start_epoch,
     )
     trainer.train()
     if args.decoder in topo_decoders:

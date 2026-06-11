@@ -68,6 +68,7 @@ class CausalClassifierTrainer:
         eval_every_epochs: int = 1,
         eval_max_batches: int = None,
         scheduler: th.optim.lr_scheduler = None,
+        start_epoch: int = 0,
         use_wandb: bool = True,
     ):
         self.train_dataset = train_dataset
@@ -87,11 +88,31 @@ class CausalClassifierTrainer:
         self.eval_every_epochs = eval_every_epochs
         self.eval_max_batches = eval_max_batches
         self.scheduler = scheduler
+        self.start_epoch = start_epoch
         self.use_wandb = use_wandb
 
         self.learning_rate = self.optimizer.param_groups[0]["lr"]
 
         self.initialise_loaders()
+
+    def checkpoint_state(self, epoch: int):
+        return {
+            "epoch": epoch + 1,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": (
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
+            "learning_rate": self.optimizer.param_groups[0]["lr"],
+            "bfloat16": self.bfloat16,
+        }
+
+    def save_checkpoint(self, epoch: int):
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        th.save(
+            self.checkpoint_state(epoch),
+            self.save_dir / "checkpoint_{}.pt".format(epoch),
+        )
 
     def initialise_loaders(self):
         collator = partial(
@@ -314,7 +335,7 @@ class CausalClassifierTrainer:
         self.model.to("cuda")
         # Find the total number of steps for warmup
         lr_warmup_steps = int(self.lr_warmup_ratio * len(self.train_loader) * self.epochs)
-        for epoch in range(self.epochs):
+        for epoch in range(self.start_epoch, self.epochs):
             metric_dict = self.train_single_epoch(
                 train_loader=self.train_loader, val_loader=self.val_loader,
                 test_loader=self.test_loader,
@@ -334,6 +355,7 @@ class CausalClassifierTrainer:
             # Step the scheduler after each epoch
             if self.scheduler is not None:
                 self.scheduler.step()
+            self.save_checkpoint(epoch)
             current_lr = self.optimizer.param_groups[0]['lr']
             if self.use_wandb:
                 metric_dict.update({"learning_rate": current_lr})
