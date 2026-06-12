@@ -195,7 +195,7 @@ def npf_main(args):
     )
 
     topo_decoders = {"topo_diffusion", "topo_priority_diffusion"}
-    use_bfloat16 = args.decoder not in topo_decoders or args.topo_bfloat16
+    use_bfloat16 = args.topo_bfloat16
     model_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
 
     TNPD_KWARGS = dict(
