@@ -104,6 +104,19 @@ def load_initial_weights(model, checkpoint_path: Path, device: str):
     print(f"Initialized model weights from: {checkpoint_path}")
 
 
+def move_optimizer_state_to_param_device_and_dtype(optimizer):
+    for param, state in optimizer.state.items():
+        if not isinstance(state, dict):
+            continue
+        for key, value in state.items():
+            if not torch.is_tensor(value):
+                continue
+            if value.is_floating_point() and value.ndim > 0 and param.is_floating_point():
+                state[key] = value.to(device=param.device, dtype=param.dtype)
+            else:
+                state[key] = value.to(device=param.device)
+
+
 def load_training_checkpoint(
     model,
     optimizer,
@@ -122,6 +135,7 @@ def load_training_checkpoint(
 
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    move_optimizer_state_to_param_device_and_dtype(optimizer)
 
     scheduler_state = checkpoint.get("scheduler_state_dict")
     if scheduler is not None and scheduler_state is not None:
@@ -278,6 +292,7 @@ def npf_main(args):
         json.dump(TNPD_KWARGS, f, default=convert_dtype)
 
     model = model_1d()
+    model.to(device=TNPD_KWARGS["device"], dtype=model_dtype)
     optimizer = optimiser_part_init(model.parameters())
     scheduler = (
         torch.optim.lr_scheduler.ExponentialLR(
