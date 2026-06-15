@@ -15,7 +15,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 
 from ml2_meta_causal_discovery.models.causaltransformercomponents import CausalTNPEncoder
@@ -111,9 +110,10 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
     """
     Reverse denoiser with exogenous priority conditioning.
 
-    The causal encoder representation is unchanged. Priority is tied to nodes,
-    gathered with the same current noisy permutation as the node embeddings, and
-    added as a monotone candidate bias to generalized-PL scores.
+    The causal encoder representation is unchanged. At each reverse step,
+    priority is gathered with the same current noisy permutation as the node
+    embeddings, embedded, concatenated to the node embeddings, and fused back to
+    d_model before the usual generalized-PL score network.
     """
 
     def __init__(
@@ -124,6 +124,7 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
         num_layers: int,
         dropout: float,
         priority_scale_init: float = -2.0,
+        priority_emb_dim: int = 16,
     ):
         super().__init__(
             d_model=d_model,
@@ -132,7 +133,20 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
             num_layers=num_layers,
             dropout=dropout,
         )
-        self.priority_log_scale = nn.Parameter(torch.tensor(float(priority_scale_init)))
+        # Kept in the signature for old configs/commands. The old direct score
+        # bias is intentionally removed; priority now enters through embeddings.
+        _ = priority_scale_init
+        self.priority_emb_dim = priority_emb_dim
+        self.priority_embedder = nn.Sequential(
+            nn.Linear(2, priority_emb_dim),
+            nn.GELU(),
+            nn.Linear(priority_emb_dim, priority_emb_dim),
+        )
+        self.priority_fuse = nn.Sequential(
+            nn.Linear(d_model + priority_emb_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
 
     @staticmethod
     def _permute_priority(perm_list: Tensor, priority: Tensor) -> Tensor:
@@ -145,6 +159,23 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
 
     def eval_patch_priority(self, src: Tensor, priority_start: Tensor) -> Tensor:
         return self._permute_priority(src, priority_start.unsqueeze(-2))
+
+    @staticmethod
+    def _priority_features(priority: Tensor) -> Tensor:
+        priority = priority.float()
+        rank = priority.argsort(dim=-1).argsort(dim=-1).to(dtype=priority.dtype)
+        denom = max(priority.size(-1) - 1, 1)
+        rank = rank / denom
+        return torch.stack([priority, rank], dim=-1)
+
+    def _fuse_priority(self, src: Tensor, priority_noisy: Tensor) -> Tensor:
+        priority_noisy = torch.flatten(priority_noisy, end_dim=-2)
+        priority_features = self._priority_features(priority_noisy).to(
+            device=src.device,
+            dtype=src.dtype,
+        )
+        priority_emb = self.priority_embedder(priority_features)
+        return self.priority_fuse(torch.cat([src, priority_emb], dim=-1))
 
     def forward(
         self,
@@ -165,17 +196,14 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
             time = time.unsqueeze(-1).expand(batch_shape)
             src = self.eval_patch_embd(src, x_start)
 
+        src = self._fuse_priority(src, priority_noisy)
         time = time.flatten()
         time_embd = self.time_embd(time).to(dtype=src.dtype)
 
         out = self.encoder_layers(src, time_embd)
         row, col = torch.split(out, [num_nodes, num_nodes], dim=-2)
         scores = torch.matmul(row, col.transpose(-1, -2))
-        scores = scores.unflatten(0, batch_shape)
-
-        scale = F.softplus(self.priority_log_scale).to(dtype=scores.dtype)
-        priority_bias = -scale * priority_noisy.to(dtype=scores.dtype)
-        return scores + priority_bias.unsqueeze(-2)
+        return scores.unflatten(0, batch_shape)
 
 
 class CausalTopoOrderDiffusion(CausalTNPEncoder):

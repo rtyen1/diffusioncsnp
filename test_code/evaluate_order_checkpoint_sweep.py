@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Sweep classifier/bak checkpoints and save order metrics/distributions.
+"""Sweep classifier/bak/topo checkpoints and save order metrics/distributions.
 
 For the direct 4-node order classifier, this script records the exact softmax
 probability of each of the D! orders. For bak/GS models, it samples many hard
-permutations and records the empirical frequency of each order.
+permutations and records the empirical frequency of each order. For topo
+diffusion models, it samples many generated orders and records their empirical
+frequency.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from evaluate_topo_order_4var_summary import (  # noqa: E402
     parse_int_list,
     remove_diag,
     sample_bak_orders,
+    sample_topo_diffusion_orders,
     summarize_orders,
 )
 from test_code.evaluate_4var_order_classifier_vs_bak import load_classifier  # noqa: E402
@@ -186,7 +189,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         device = "cpu"
 
     methods = set(parse_csv_list(args.methods))
-    valid_methods = {"classifier", "bak"}
+    valid_methods = {"classifier", "bak", "topo"}
     unknown_methods = methods - valid_methods
     if unknown_methods:
         raise ValueError(f"Unknown methods: {sorted(unknown_methods)}. Use any of: {sorted(valid_methods)}")
@@ -238,6 +241,55 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                     "checkpoint": checkpoint,
                 }
             )
+    if "topo" in methods:
+        topo_checkpoints = parse_checkpoints(
+            args.topo_checkpoints,
+            args.topo_checkpoint_start,
+            args.topo_checkpoint_end,
+            args.topo_checkpoint_prefix,
+            args.topo_checkpoint_suffix,
+        )
+        topo_eval_modes = set(parse_csv_list(args.topo_eval_modes))
+        valid_topo_modes = {"sample", "deterministic", "beam"}
+        unknown_topo_modes = topo_eval_modes - valid_topo_modes
+        if unknown_topo_modes:
+            raise ValueError(
+                f"Unknown topo_eval_modes: {sorted(unknown_topo_modes)}. "
+                f"Use any of: {sorted(valid_topo_modes)}"
+            )
+        for checkpoint in topo_checkpoints:
+            if "sample" in topo_eval_modes:
+                model_specs.append(
+                    {
+                        "kind": "topo",
+                        "method": args.topo_method_name,
+                        "run_name": args.topo_run_name,
+                        "checkpoint": checkpoint,
+                        "deterministic": False,
+                    }
+                )
+            if "deterministic" in topo_eval_modes:
+                model_specs.append(
+                    {
+                        "kind": "topo",
+                        "method": f"{args.topo_method_name}-det",
+                        "run_name": args.topo_run_name,
+                        "checkpoint": checkpoint,
+                        "deterministic": True,
+                        "beam": False,
+                    }
+                )
+            if "beam" in topo_eval_modes:
+                model_specs.append(
+                    {
+                        "kind": "topo",
+                        "method": f"{args.topo_method_name}-beam",
+                        "run_name": args.topo_run_name,
+                        "checkpoint": checkpoint,
+                        "deterministic": False,
+                        "beam": True,
+                    }
+                )
 
     print("=" * 100)
     print("Order checkpoint sweep")
@@ -258,7 +310,10 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         kind = spec["kind"]
         checkpoint = spec["checkpoint"]
         ckpt_idx = checkpoint_index(checkpoint)
-        variant = f"{spec['run_name']}_{checkpoint}_orders{args.num_order_samples}"
+        if spec.get("beam", False):
+            variant = f"{spec['run_name']}_{checkpoint}_beam_best"
+        else:
+            variant = f"{spec['run_name']}_{checkpoint}_orders{args.num_order_samples}"
 
         print("=" * 100)
         print(f"[{spec_idx}/{len(model_specs)}] Loading {kind}: {spec['run_name']}/{checkpoint}")
@@ -271,7 +326,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                     continue
                 raise FileNotFoundError(f"Missing classifier checkpoint: {checkpoint_path}")
             model, _, loaded_path = load_classifier(run_dir=run_dir, checkpoint=checkpoint, device=device)
-        else:
+        elif kind in {"bak", "topo"}:
             checkpoint_path = models_root / spec["run_name"] / checkpoint
             if not checkpoint_path.exists():
                 if args.skip_missing_checkpoints:
@@ -286,6 +341,8 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                 device=device,
                 bak_path=bak_path,
             )
+        else:
+            raise ValueError(f"Unknown model kind: {kind}")
         print(f"loaded: {loaded_path}")
 
         for n, files in files_by_n.items():
@@ -344,6 +401,18 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                                 )
                                 metrics = summarize_orders(true_dag, sampled_orders)
                                 metrics.update(exact_metrics)
+                            elif kind == "topo":
+                                sampled_orders = sample_topo_diffusion_orders(
+                                    model=model,
+                                    data=data,
+                                    num_order_samples=args.num_order_samples,
+                                    device=device,
+                                    standardize=args.standardize,
+                                    deterministic=bool(spec.get("deterministic", False)),
+                                    beam=bool(spec.get("beam", False)),
+                                )
+                                metrics = summarize_orders(true_dag, sampled_orders)
+                                order_dist = bak_distribution_from_samples(sampled_orders, order_strings)
                             else:
                                 sampled_orders = sample_bak_orders(
                                     model=model,
@@ -539,6 +608,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bak_checkpoint_end", type=int, default=8)
     parser.add_argument("--bak_checkpoint_prefix", type=str, default="model_")
     parser.add_argument("--bak_checkpoint_suffix", type=str, default=".pt")
+
+    parser.add_argument("--topo_run_name", type=str, default="")
+    parser.add_argument("--topo_method_name", type=str, default="TopoDiff")
+    parser.add_argument("--topo_checkpoints", type=str, default="")
+    parser.add_argument("--topo_checkpoint_start", type=int, default=0)
+    parser.add_argument("--topo_checkpoint_end", type=int, default=0)
+    parser.add_argument("--topo_checkpoint_prefix", type=str, default="model_")
+    parser.add_argument("--topo_checkpoint_suffix", type=str, default=".pt")
+    parser.add_argument("--topo_eval_modes", type=str, default="sample")
 
     parser.add_argument("--results_dir", type=str, default="result/order_checkpoint_sweep")
     parser.add_argument("--summary_prefix", type=str, default="order_checkpoint_sweep")

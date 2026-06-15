@@ -293,6 +293,7 @@ def sample_topo_diffusion_orders(
     device: str,
     standardize: bool,
     deterministic: bool = False,
+    beam: bool = False,
     return_priority: bool = False,
 ) -> Any:
     inputs = encode_input(data, device=device, standardize=standardize)
@@ -302,7 +303,14 @@ def sample_topo_diffusion_orders(
         was_training = model.reverse_model.training
         model.reverse_model.eval()
         try:
-            if hasattr(model, "_p_sample_loop_with_priority"):
+            if beam:
+                if hasattr(model, "_p_sample_loop_with_priority"):
+                    raise NotImplementedError("Beam search is not implemented for priority-conditioned topo diffusion.")
+                _, orders = model.diffusion_utils.p_sample_beam_search(
+                    node_repr,
+                    model.reverse_model,
+                )
+            elif hasattr(model, "_p_sample_loop_with_priority"):
                 batch_size, num_nodes, d_model = node_repr.shape
                 priority = model._sample_priorities(
                     batch_size=num_order_samples * batch_size,
@@ -515,7 +523,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
         if not args.topo_run_name:
             raise ValueError("Use --topo_run_name when --methods includes topo.")
         topo_eval_modes = set(parse_csv_list(args.topo_eval_modes))
-        valid_topo_modes = {"sample", "deterministic"}
+        valid_topo_modes = {"sample", "deterministic", "beam"}
         unknown_topo_modes = topo_eval_modes - valid_topo_modes
         if unknown_topo_modes:
             raise ValueError(
@@ -544,6 +552,17 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                     "variant_suffix": "deterministic",
                 }
             )
+        if "beam" in topo_eval_modes:
+            model_specs.append(
+                {
+                    "method": f"{args.topo_method_name}-beam",
+                    "run_name": args.topo_run_name,
+                    "checkpoint": args.topo_checkpoint,
+                    "source": "current",
+                    "kind": "topo_diffusion_beam",
+                    "variant_suffix": "beam",
+                }
+            )
     if not model_specs:
         raise ValueError("No methods selected.")
 
@@ -570,7 +589,10 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
         variant = f"{spec['run_name']}_{spec['checkpoint']}"
         if "variant_suffix" in spec:
             variant = f"{variant}_{spec['variant_suffix']}"
-        variant = f"{variant}_orders{args.num_order_samples}"
+        if spec.get("variant_suffix") == "beam":
+            variant = f"{variant}_best"
+        else:
+            variant = f"{variant}_orders{args.num_order_samples}"
         loaded_models.append((spec["method"], spec["kind"], variant, model))
         print(f"  loaded: {model_path}")
 
@@ -625,7 +647,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                                     device=device,
                                     standardize=args.standardize,
                                 )
-                            elif kind in {"topo_diffusion_sample", "topo_diffusion_deterministic"}:
+                            elif kind in {"topo_diffusion_sample", "topo_diffusion_deterministic", "topo_diffusion_beam"}:
                                 if hasattr(model, "_p_sample_loop_with_priority"):
                                     orders, priorities = sample_topo_diffusion_orders(
                                         model=model,
@@ -634,6 +656,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                                         device=device,
                                         standardize=args.standardize,
                                         deterministic=(kind == "topo_diffusion_deterministic"),
+                                        beam=(kind == "topo_diffusion_beam"),
                                         return_priority=True,
                                     )
                                     metrics = summarize_orders(true_dag, orders)
@@ -654,6 +677,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                                     device=device,
                                     standardize=args.standardize,
                                     deterministic=(kind == "topo_diffusion_deterministic"),
+                                    beam=(kind == "topo_diffusion_beam"),
                                 )
                             else:
                                 orders = sample_bak_orders(
@@ -703,7 +727,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topo_run_name", type=str, default="")
     parser.add_argument("--topo_checkpoint", type=str, default="model_11.pt")
     parser.add_argument("--topo_method_name", type=str, default="GPL-topo-diffusion")
-    parser.add_argument("--topo_eval_modes", type=str, default="sample", help="Comma-separated subset of sample,deterministic.")
+    parser.add_argument("--topo_eval_modes", type=str, default="sample", help="Comma-separated subset of sample,deterministic,beam.")
     parser.add_argument("--bak_model_file", type=str, default="ml2_meta_causal_discovery/models/causaltransformernp.py.mask_version.bak")
 
     parser.add_argument("--results_dir", type=str, default="benchmark_results_4var_topo_order")
