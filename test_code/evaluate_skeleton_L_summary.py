@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """Evaluate whether CSNP L parameters learn the undirected skeleton.
 
-This script intentionally ignores sampled permutations Q.  It decodes L_param,
+This script intentionally ignores sampled permutations Q. It decodes L_param,
 converts sigmoid(L_param) into undirected pair probabilities, thresholds those
 probabilities, and compares them with the true graph skeleton.
+
+The summary keeps only the key skeleton metrics:
+  - exact match, SHD, F1, AUC, and Brier score.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import argparse
 import glob
 import importlib.util
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -30,12 +34,49 @@ import pandas as pd
 import torch as th
 
 
+KEY_METRICS = [
+    "skeleton_exact_match",
+    "skeleton_shd",
+    "skeleton_f1",
+    "skeleton_auc",
+    "skeleton_brier",
+]
+PLOT_METRICS = [f"mean_{metric}" for metric in KEY_METRICS]
+
+
 def parse_csv_list(s: str) -> List[str]:
     return [x.strip() for x in str(s).split(",") if x.strip()]
 
 
 def parse_int_list(s: str) -> List[int]:
     return [int(x) for x in parse_csv_list(s)]
+
+
+def parse_checkpoints(
+    *,
+    explicit: str,
+    single: str,
+    start: Optional[int],
+    end: Optional[int],
+    prefix: str,
+    suffix: str,
+) -> List[str]:
+    if explicit:
+        checkpoints = [x.strip() for x in explicit.split(",") if x.strip()]
+    elif start is not None or end is not None:
+        if start is None or end is None:
+            raise ValueError("Use both checkpoint_start and checkpoint_end for checkpoint sweeps.")
+        checkpoints = [f"{prefix}{i}{suffix}" for i in range(start, end + 1)]
+    else:
+        checkpoints = [single]
+    if not checkpoints:
+        raise ValueError("No checkpoints selected.")
+    return checkpoints
+
+
+def checkpoint_index(checkpoint: str) -> int:
+    match = re.search(r"(\d+)(?=\.pt$|$)", checkpoint)
+    return int(match.group(1)) if match else -1
 
 
 def pair_order(num_nodes: int) -> List[Tuple[int, int]]:
@@ -128,28 +169,26 @@ def skeleton_metrics(true_dag: np.ndarray, skel_prob: np.ndarray, threshold: flo
     y_prob = np.array([skel_prob[i, j] for i, j in pairs], dtype=float)
     y_pred = (y_prob > threshold).astype(int)
 
-    eps = 1e-6
-    clipped = np.clip(y_prob, eps, 1.0 - eps)
-    out: Dict[str, float] = {
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+    denom = 2 * tp + fp + fn
+    skeleton_f1 = 1.0 if denom == 0 else (2 * tp / denom)
+
+    return {
         "skeleton_exact_match": float(np.array_equal(y_true, y_pred)),
         "skeleton_shd": float(np.abs(y_true - y_pred).sum()),
         "skeleton_auc": roc_auc_score_binary(y_true, y_prob),
-        "skeleton_ap": average_precision_binary(y_true, y_prob),
+        "skeleton_f1": float(skeleton_f1),
         "skeleton_brier": float(np.mean((y_prob - y_true) ** 2)),
-        "skeleton_log_loss": float(-np.mean(y_true * np.log(clipped) + (1 - y_true) * np.log(1 - clipped))),
-        "mean_true_edge_prob": float(np.mean(y_prob[y_true == 1])) if np.any(y_true == 1) else float("nan"),
-        "mean_true_nonedge_prob": float(np.mean(y_prob[y_true == 0])) if np.any(y_true == 0) else float("nan"),
-        "num_true_skeleton_edges": float(y_true.sum()),
-        "num_pred_skeleton_edges": float(y_pred.sum()),
     }
-    out.update(binary_stats(y_true, y_pred))
-    return out
 
 
 class RunningSummary:
     def __init__(self, group_cols: Sequence[str]) -> None:
         self.group_cols = list(group_cols)
         self.sums: Dict[Tuple[Any, ...], Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self.metric_counts: Dict[Tuple[Any, ...], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.counts: Dict[Tuple[Any, ...], int] = defaultdict(int)
         self.errors: Dict[Tuple[Any, ...], int] = defaultdict(int)
 
@@ -159,6 +198,7 @@ class RunningSummary:
         for metric, value in metrics.items():
             if isinstance(value, (int, float, np.integer, np.floating)) and not pd.isna(value):
                 self.sums[key][metric] += float(value)
+                self.metric_counts[key][metric] += 1
 
     def add_error(self, group: Dict[str, Any]) -> None:
         key = tuple(group[c] for c in self.group_cols)
@@ -172,8 +212,10 @@ class RunningSummary:
             row = {col: value for col, value in zip(self.group_cols, key)}
             row["n_ok"] = n_ok
             row["n_errors"] = self.errors.get(key, 0)
-            for metric, total in sorted(self.sums.get(key, {}).items()):
-                row[f"mean_{metric}"] = total / n_ok if n_ok > 0 else np.nan
+            for metric in KEY_METRICS:
+                total = self.sums.get(key, {}).get(metric, 0.0)
+                metric_count = self.metric_counts.get(key, {}).get(metric, 0)
+                row[f"mean_{metric}"] = total / metric_count if metric_count > 0 else np.nan
             rows.append(row)
         return pd.DataFrame(rows)
 
@@ -359,23 +401,43 @@ def method_specs(args: argparse.Namespace) -> List[Dict[str, str]]:
     specs: List[Dict[str, str]] = []
     methods = parse_csv_list(args.methods)
     if "bak" in methods:
-        specs.append(
-            {
-                "method": "bak",
-                "run_name": args.bak_run_name,
-                "checkpoint": args.bak_checkpoint,
-                "source": args.bak_model_source,
-            }
+        checkpoints = parse_checkpoints(
+            explicit=args.bak_checkpoints,
+            single=args.bak_checkpoint,
+            start=args.bak_checkpoint_start,
+            end=args.bak_checkpoint_end,
+            prefix=args.bak_checkpoint_prefix,
+            suffix=args.bak_checkpoint_suffix,
         )
+        for checkpoint in checkpoints:
+            specs.append(
+                {
+                    "method": "bak",
+                    "run_name": args.bak_run_name,
+                    "checkpoint": checkpoint,
+                    "checkpoint_index": checkpoint_index(checkpoint),
+                    "source": args.bak_model_source,
+                }
+            )
     if "ar" in methods:
-        specs.append(
-            {
-                "method": "ar",
-                "run_name": args.ar_run_name,
-                "checkpoint": args.ar_checkpoint,
-                "source": args.ar_model_source,
-            }
+        checkpoints = parse_checkpoints(
+            explicit=args.ar_checkpoints,
+            single=args.ar_checkpoint,
+            start=args.ar_checkpoint_start,
+            end=args.ar_checkpoint_end,
+            prefix=args.ar_checkpoint_prefix,
+            suffix=args.ar_checkpoint_suffix,
         )
+        for checkpoint in checkpoints:
+            specs.append(
+                {
+                    "method": "ar",
+                    "run_name": args.ar_run_name,
+                    "checkpoint": checkpoint,
+                    "checkpoint_index": checkpoint_index(checkpoint),
+                    "source": args.ar_model_source,
+                }
+            )
     unknown = sorted(set(methods) - {"bak", "ar"})
     if unknown:
         raise ValueError(f"Unknown methods: {unknown}. Use bak, ar, or bak,ar.")
@@ -395,6 +457,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
             "method",
             "run_name",
             "checkpoint",
+            "checkpoint_index",
             "benchmark_kind",
             "generator",
             "graph_id",
@@ -407,16 +470,24 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
     print(f"models_root:    {models_root}")
     for spec in method_specs(args):
         print(f"Loading {spec['method']}: {spec['run_name']}/{spec['checkpoint']} source={spec['source']}")
-        model, config, path = load_model(
-            models_root=models_root,
-            run_name=spec["run_name"],
-            checkpoint=spec["checkpoint"],
-            source=spec["source"],
-            bak_path=bak_path,
-            device=args.device,
-        )
+        try:
+            model, config, path = load_model(
+                models_root=models_root,
+                run_name=spec["run_name"],
+                checkpoint=spec["checkpoint"],
+                source=spec["source"],
+                bak_path=bak_path,
+                device=args.device,
+            )
+        except FileNotFoundError:
+            if args.skip_missing_checkpoints:
+                print(f"  [SKIP] missing checkpoint: {models_root / spec['run_name'] / spec['checkpoint']}")
+                continue
+            raise
         print(f"  loaded: {path}")
         loaded.append((spec, model, config))
+    if not loaded:
+        raise ValueError("No models loaded.")
 
     print("=" * 100)
     print("Skeleton-L evaluation")
@@ -469,6 +540,7 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                             "method": spec["method"],
                             "run_name": spec["run_name"],
                             "checkpoint": spec["checkpoint"],
+                            "checkpoint_index": spec["checkpoint_index"],
                             "benchmark_kind": args.benchmark_kind,
                             "generator": generator,
                             "graph_id": graph_id,
@@ -485,9 +557,6 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                             for local_idx in range(edge_probs_batch.shape[0]):
                                 skel_prob = skeleton_prob_from_l(edge_probs_batch[local_idx])
                                 metrics = skeleton_metrics(label_batch[local_idx], skel_prob, threshold=args.threshold)
-                                metrics["l_asymmetry_mean_abs"] = float(
-                                    np.mean(np.abs(edge_probs_batch[local_idx] - edge_probs_batch[local_idx].T))
-                                )
                                 result_summary.add_ok(group, metrics)
                         except Exception as exc:
                             result_summary.add_error(group)
@@ -499,6 +568,66 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
                     break
 
     return result_summary.to_frame()
+
+
+def save_metric_plots(summary: pd.DataFrame, plots_dir: Path, prefix: str) -> List[Path]:
+    try:
+        mpl_cache_dir = Path(os.environ.get("MPLCONFIGDIR", "/tmp/matplotlib-csnp-cache"))
+        mpl_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache_dir))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[WARN] matplotlib unavailable; skip plots: {repr(exc)}")
+        return []
+
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    metric_cols = [
+        c for c in PLOT_METRICS
+        if c in summary.columns and pd.api.types.is_numeric_dtype(summary[c])
+    ]
+    written: List[Path] = []
+    if not metric_cols:
+        return written
+
+    for metric in metric_cols:
+        fig, ax = plt.subplots(figsize=(8.0, 5.0))
+        plotted = False
+        for method in sorted(summary["method"].dropna().unique()):
+            for n in sorted(summary["sample_size"].dropna().unique()):
+                sub = summary[
+                    (summary["method"] == method)
+                    & (summary["sample_size"] == n)
+                ].sort_values("checkpoint_index")
+                sub = sub.dropna(subset=[metric])
+                if sub.empty:
+                    continue
+                ax.plot(
+                    sub["checkpoint_index"],
+                    sub[metric],
+                    marker="o",
+                    linewidth=1.6,
+                    label=f"{method}, n={int(n)}",
+                )
+                plotted = True
+
+        if not plotted:
+            plt.close(fig)
+            continue
+        ax.set_xlabel("checkpoint index")
+        ax.set_ylabel(metric)
+        ax.set_title(metric)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, ncol=2)
+        fig.tight_layout()
+        out_path = plots_dir / f"{prefix}_{metric}.png"
+        fig.savefig(out_path, dpi=180)
+        plt.close(fig)
+        written.append(out_path)
+
+    return written
 
 
 def main() -> None:
@@ -519,9 +648,19 @@ def main() -> None:
 
     parser.add_argument("--bak_run_name", type=str, default="gp_4var_prob_bakL_100k")
     parser.add_argument("--bak_checkpoint", type=str, default="model_9.pt")
+    parser.add_argument("--bak_checkpoints", type=str, default="")
+    parser.add_argument("--bak_checkpoint_start", type=int, default=None)
+    parser.add_argument("--bak_checkpoint_end", type=int, default=None)
+    parser.add_argument("--bak_checkpoint_prefix", type=str, default="model_")
+    parser.add_argument("--bak_checkpoint_suffix", type=str, default=".pt")
     parser.add_argument("--bak_model_source", type=str, default="bak", choices=["bak", "current"])
     parser.add_argument("--ar_run_name", type=str, default="gp_4var_prob_ar_bakL_100k")
     parser.add_argument("--ar_checkpoint", type=str, default="model_9.pt")
+    parser.add_argument("--ar_checkpoints", type=str, default="")
+    parser.add_argument("--ar_checkpoint_start", type=int, default=None)
+    parser.add_argument("--ar_checkpoint_end", type=int, default=None)
+    parser.add_argument("--ar_checkpoint_prefix", type=str, default="model_")
+    parser.add_argument("--ar_checkpoint_suffix", type=str, default=".pt")
     parser.add_argument("--ar_model_source", type=str, default="current", choices=["bak", "current"])
 
     parser.add_argument("--benchmark_kind", type=str, default="random_gp", choices=["random_gp", "fixed_graph"])
@@ -541,6 +680,7 @@ def main() -> None:
     parser.add_argument("--max_datasets_per_file", type=int, default=None)
     parser.add_argument("--max_datasets_per_n", type=int, default=None)
     parser.add_argument("--skip_missing", action="store_true")
+    parser.add_argument("--skip_missing_checkpoints", action="store_true")
     parser.add_argument("--print_errors", action="store_true")
 
     parser.add_argument("--results_dir", type=str, default="result")
@@ -555,8 +695,15 @@ def main() -> None:
     results_dir = Path(args.results_dir).expanduser().resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     out_path = results_dir / args.summary_name
+    args_path = results_dir / f"{out_path.stem}_args.json"
     df.to_csv(out_path, index=False)
+    with open(args_path, "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, indent=2)
     print(f"Wrote summary: {out_path.resolve()}")
+    print(f"Wrote args:    {args_path.resolve()}")
+    plot_paths = save_metric_plots(df, results_dir / "plots", out_path.stem)
+    if plot_paths:
+        print(f"Wrote {len(plot_paths)} plots under: {(results_dir / 'plots').resolve()}")
 
 
 if __name__ == "__main__":

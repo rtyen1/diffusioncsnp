@@ -133,9 +133,9 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
             num_layers=num_layers,
             dropout=dropout,
         )
-        # Kept in the signature for old configs/commands. The old direct score
-        # bias is intentionally removed; priority now enters through embeddings.
-        _ = priority_scale_init
+        # Kept in the signature for old configs/commands. This is now used as
+        # the initial log-gate for the learned priority column residual, not as
+        # a hand-written score bias.
         self.priority_emb_dim = priority_emb_dim
         self.priority_embedder = nn.Sequential(
             nn.Linear(2, priority_emb_dim),
@@ -147,6 +147,8 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
             nn.GELU(),
             nn.Linear(d_model, d_model),
         )
+        self.priority_col_fuse = nn.Linear(d_model + priority_emb_dim, d_model)
+        self.priority_col_gate = nn.Parameter(torch.tensor(float(priority_scale_init)))
 
     @staticmethod
     def _permute_priority(perm_list: Tensor, priority: Tensor) -> Tensor:
@@ -168,14 +170,15 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
         rank = rank / denom
         return torch.stack([priority, rank], dim=-1)
 
-    def _fuse_priority(self, src: Tensor, priority_noisy: Tensor) -> Tensor:
+    def _fuse_priority(self, src: Tensor, priority_noisy: Tensor) -> Tuple[Tensor, Tensor]:
         priority_noisy = torch.flatten(priority_noisy, end_dim=-2)
         priority_features = self._priority_features(priority_noisy).to(
             device=src.device,
             dtype=src.dtype,
         )
         priority_emb = self.priority_embedder(priority_features)
-        return self.priority_fuse(torch.cat([src, priority_emb], dim=-1))
+        src = self.priority_fuse(torch.cat([src, priority_emb], dim=-1))
+        return src, priority_emb
 
     def forward(
         self,
@@ -196,12 +199,18 @@ class PriorityCausalEmbeddingReverseDiffusion(CausalEmbeddingReverseDiffusion):
             time = time.unsqueeze(-1).expand(batch_shape)
             src = self.eval_patch_embd(src, x_start)
 
-        src = self._fuse_priority(src, priority_noisy)
+        src, priority_emb = self._fuse_priority(src, priority_noisy)
         time = time.flatten()
         time_embd = self.time_embd(time).to(dtype=src.dtype)
 
         out = self.encoder_layers(src, time_embd)
         row, col = torch.split(out, [num_nodes, num_nodes], dim=-2)
+        col_delta = self.priority_col_fuse(torch.cat([col, priority_emb], dim=-1))
+        priority_col_scale = torch.nn.functional.softplus(self.priority_col_gate).to(
+            device=col.device,
+            dtype=col.dtype,
+        )
+        col = col + priority_col_scale * col_delta
         scores = torch.matmul(row, col.transpose(-1, -2))
         return scores.unflatten(0, batch_shape)
 
@@ -682,6 +691,83 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
 
         result_x = _sd_utils.permute_embd(perm, x_start)
         return result_x, perm
+
+    @torch.no_grad()
+    def _p_sample_beam_search_with_priority(
+        self,
+        x_start: Tensor,
+        priority_start: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Beam-search reverse diffusion conditioned on fixed priority features.
+
+        This mirrors DiffusionUtils.p_sample_beam_search, but calls the priority
+        reverse model with both x_start and priority_start.
+        """
+        if self.diffusion_utils.reverse != "generalized_PL":
+            raise NotImplementedError("Priority beam search currently supports generalized_PL only.")
+
+        device = x_start.device
+        batch_size = x_start.size(0)
+        num_nodes = x_start.size(1)
+        pl_beam_size = self.diffusion_utils.PL_beam_size
+        t_beam_size = self.diffusion_utils.t_beam_size
+
+        time = torch.full(
+            (batch_size,),
+            self.diffusion_utils.num_timesteps,
+            device=device,
+        )
+        identity_perm = torch.arange(num_nodes, device=device).expand(batch_size, 1, -1)
+        scores = self.reverse_model(
+            identity_perm,
+            time,
+            x_start,
+            priority_start,
+        ).squeeze(1)
+
+        result_perm, result_log_probs = PL.sample_generalized_PL_beam_search(
+            scores,
+            pl_beam_size,
+        )
+        result_perm = result_perm[..., :t_beam_size, :]
+        result_log_probs = result_log_probs[..., :t_beam_size]
+
+        for step in reversed(self.diffusion_utils.reverse_steps[1:-1]):
+            time = torch.full((batch_size,), step, device=device)
+            scores = self.reverse_model(
+                result_perm,
+                time,
+                x_start,
+                priority_start,
+            )
+            candidates_perm, candidates_log_probs = PL.sample_generalized_PL_beam_search(
+                scores,
+                pl_beam_size,
+            )
+            candidates_perm = candidates_perm[..., :t_beam_size, :]
+            candidates_log_probs = candidates_log_probs[..., :t_beam_size]
+
+            candidates_perm = _sd_utils.permute_int_list(
+                candidates_perm,
+                result_perm.unsqueeze(-2),
+            )
+            candidates_log_probs = result_log_probs.unsqueeze(-1) + candidates_log_probs
+
+            candidates_perm = candidates_perm.flatten(start_dim=-3, end_dim=-2)
+            candidates_log_probs = candidates_log_probs.flatten(start_dim=-2)
+
+            num_selected = min(t_beam_size, candidates_log_probs.size(-1))
+            result_log_probs, topk_idx = torch.topk(
+                candidates_log_probs,
+                k=num_selected,
+                dim=-1,
+            )
+            topk_idx_expanded = topk_idx.unsqueeze(-1).expand(-1, -1, num_nodes)
+            result_perm = torch.gather(candidates_perm, -2, topk_idx_expanded)
+
+        best_perm = result_perm[:, 0, :]
+        result_x = _sd_utils.permute_embd(best_perm, x_start)
+        return result_x, best_perm
 
     def forward(
         self,

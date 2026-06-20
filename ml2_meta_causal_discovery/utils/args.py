@@ -267,7 +267,7 @@ def retun_default_args(parser):
         "--topo_priority_scale_init",
         default=-2.0,
         type=float,
-        help="Initial log-scale for priority score bias in --decoder topo_priority_diffusion.",
+        help="Initial log-gate for priority column residual in --decoder topo_priority_diffusion.",
     )
     parser.add_argument(
         "--topo_bfloat16",

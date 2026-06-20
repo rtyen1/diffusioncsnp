@@ -304,12 +304,29 @@ def sample_topo_diffusion_orders(
         model.reverse_model.eval()
         try:
             if beam:
-                if hasattr(model, "_p_sample_loop_with_priority"):
-                    raise NotImplementedError("Beam search is not implemented for priority-conditioned topo diffusion.")
-                _, orders = model.diffusion_utils.p_sample_beam_search(
-                    node_repr,
-                    model.reverse_model,
-                )
+                if hasattr(model, "_p_sample_beam_search_with_priority"):
+                    batch_size, num_nodes, d_model = node_repr.shape
+                    priority = model._sample_priorities(
+                        batch_size=num_order_samples * batch_size,
+                        num_nodes=num_nodes,
+                        device=node_repr.device,
+                        dtype=node_repr.dtype,
+                    )
+                    priority_np = priority.detach().cpu().numpy().astype(np.float32)
+                    node_repr = (
+                        node_repr.unsqueeze(0)
+                        .expand(num_order_samples, batch_size, num_nodes, d_model)
+                        .reshape(num_order_samples * batch_size, num_nodes, d_model)
+                    )
+                    _, orders = model._p_sample_beam_search_with_priority(
+                        node_repr,
+                        priority_start=priority,
+                    )
+                else:
+                    _, orders = model.diffusion_utils.p_sample_beam_search(
+                        node_repr,
+                        model.reverse_model,
+                    )
             elif hasattr(model, "_p_sample_loop_with_priority"):
                 batch_size, num_nodes, d_model = node_repr.shape
                 priority = model._sample_priorities(
