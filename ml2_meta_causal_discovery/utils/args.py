@@ -276,6 +276,24 @@ def retun_default_args(parser):
         help="Train topo_diffusion/topo_priority_diffusion in bfloat16 instead of float32.",
     )
     parser.add_argument(
+        "--skeleton_loss_weight",
+        default=1.0,
+        type=float,
+        help="Loss weight for the bak-style skeleton head in *_skeleton topo decoders.",
+    )
+    parser.add_argument(
+        "--order_loss_weight",
+        default=1.0,
+        type=float,
+        help="Loss weight for the diffusion topological-order objective in *_skeleton topo decoders.",
+    )
+    parser.add_argument(
+        "--skeleton_decoder_layers",
+        default=2,
+        type=int,
+        help="Number of bak-style self-attention decoder layers for the skeleton head.",
+    )
+    parser.add_argument(
         "--use_positional_encoding",
         "-upe",
         default=False,

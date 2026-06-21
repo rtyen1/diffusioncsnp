@@ -17,7 +17,11 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ml2_meta_causal_discovery.models.causaltransformercomponents import CausalTNPEncoder
+from ml2_meta_causal_discovery.models.causaltransformercomponents import (
+    CausalAdjacencyMatrix,
+    CausalTNPEncoder,
+    CausalTransformerDecoderLayer,
+)
 from ml2_meta_causal_discovery.utils.topological_orders import (
     priority_kahn_topological_sort,
     random_kahn_topological_sort,
@@ -33,6 +37,208 @@ import PL_distribution as PL  # noqa: E402
 from diffusion import DiffusionUtils  # noqa: E402
 from models import EncoderLayers  # noqa: E402
 from models import TimestepEmbedder  # noqa: E402
+
+
+class BakStyleSkeletonHead(nn.Module):
+    """Bak-style symmetric skeleton head.
+
+    Input node representations keep the original node id order. The output
+    logits are symmetric and are intended for unordered skeleton prediction.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        num_layers: int,
+        dropout: float,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=CausalTransformerDecoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                norm_first=True,
+                batch_first=True,
+                device=device,
+                dtype=dtype,
+                bias=False,
+            ),
+            num_layers=num_layers,
+        )
+        self.param = CausalAdjacencyMatrix(
+            nhead=nhead,
+            d_model=d_model,
+            device=device,
+            dtype=dtype,
+        )
+
+    def forward(self, node_repr: Tensor, padding_mask: Optional[Tensor] = None) -> Tensor:
+        skel_repr = self.decoder(
+            node_repr,
+            memory=None,
+            tgt_key_padding_mask=padding_mask,
+        )
+        logits = self.param(skel_repr, padding_mask=None)
+        return (logits + logits.transpose(1, 2)) / 2
+
+
+class BakStyleSkeletonMixin:
+    def _init_skeleton_head(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        num_layers_skeleton: int,
+        dropout: float,
+        skeleton_loss_weight: float,
+        order_loss_weight: float,
+        device=None,
+        dtype=None,
+    ) -> None:
+        self.skeleton_loss_weight = skeleton_loss_weight
+        self.order_loss_weight = order_loss_weight
+        self.skeleton_head = BakStyleSkeletonHead(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            num_layers=num_layers_skeleton,
+            dropout=dropout,
+            device=device,
+            dtype=dtype,
+        )
+
+    @staticmethod
+    def _decoder_mask(mask: Optional[Tensor]) -> Optional[Tensor]:
+        return mask[:, 0, :] if mask is not None else None
+
+    def _skeleton_logits_from_data(self, target_data: Tensor, mask: Optional[Tensor]) -> Tensor:
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+        return self.skeleton_head(
+            raw_node_repr,
+            padding_mask=self._decoder_mask(mask),
+        )
+
+    def _skeleton_loss_per_batch(
+        self,
+        logits: Tensor,
+        graph: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tensor:
+        target = ((graph > 0.5) | (graph.transpose(1, 2) > 0.5)).to(dtype=logits.dtype)
+        num_nodes = logits.size(-1)
+        pair_mask = torch.triu(
+            torch.ones((num_nodes, num_nodes), dtype=torch.bool, device=logits.device),
+            diagonal=1,
+        ).unsqueeze(0)
+
+        decoder_mask = self._decoder_mask(mask)
+        if decoder_mask is not None:
+            valid_nodes = decoder_mask > -1e20
+            pair_mask = pair_mask & valid_nodes.unsqueeze(1) & valid_nodes.unsqueeze(2)
+
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits.float(),
+            target.float(),
+            reduction="none",
+        )
+        pair_weight = pair_mask.to(dtype=loss.dtype)
+        denom = pair_weight.flatten(1).sum(dim=1).clamp_min(1)
+        return (loss * pair_weight).flatten(1).sum(dim=1) / denom
+
+
+class CausalSkeletonDecoder(BakStyleSkeletonMixin, CausalTNPEncoder):
+    """Skeleton-only decoder using the causal encoder and a bak-style L head."""
+
+    def __init__(
+        self,
+        d_model,
+        emb_depth,
+        dim_feedforward,
+        nhead,
+        dropout,
+        num_layers_encoder,
+        num_layers_decoder,
+        num_nodes,
+        n_perm_samples=None,
+        sinkhorn_iter=None,
+        use_positional_encoding=False,
+        skeleton_loss_weight: float = 1.0,
+        skeleton_decoder_layers: int = 2,
+        device=None,
+        dtype=None,
+        mlp_use_bias: bool = False,
+        **kwargs,
+    ):
+        super(CausalSkeletonDecoder, self).__init__(
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            nhead=nhead,
+            num_layers=num_layers_encoder,
+            emb_depth=emb_depth,
+            num_nodes=num_nodes,
+            use_positional_encoding=use_positional_encoding,
+            dropout=dropout,
+            device=device,
+            dtype=dtype,
+            mlp_use_bias=mlp_use_bias,
+        )
+        self.num_nodes = num_nodes
+        self._init_skeleton_head(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            num_layers_skeleton=skeleton_decoder_layers,
+            dropout=dropout,
+            skeleton_loss_weight=skeleton_loss_weight,
+            order_loss_weight=0.0,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _encode_raw_data(self, target_data: Tensor, mask: Optional[Tensor]) -> Tensor:
+        if target_data.dim() == 3:
+            target_data = target_data.unsqueeze(-1)
+        return self.encode(target_data=target_data, mask=mask).squeeze(2)
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        skeleton_logits = self._skeleton_logits_from_data(target_data, mask=mask)
+        output = {"skeleton_logits": skeleton_logits}
+        if graph is not None:
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+            output["loss"] = self.skeleton_loss_weight * skeleton_loss
+            output["skeleton_loss"] = skeleton_loss
+        return output
+
+    def calculate_loss(self, output, target):
+        if not isinstance(output, dict) or "loss" not in output:
+            raise ValueError("CausalSkeletonDecoder expects forward() to return a loss dict.")
+        return output["loss"]
+
+    def sample(self, target_data: Tensor, num_samples: int = 1, mask: Optional[Tensor] = None):
+        logits = self._skeleton_logits_from_data(target_data, mask=mask)
+        probs = torch.sigmoid(logits)
+        eye = torch.eye(probs.size(-1), device=probs.device, dtype=probs.dtype)
+        probs = probs * (1 - eye)
+        upper_probs = torch.triu(probs, diagonal=1)
+        upper_samples = torch.distributions.Bernoulli(probs=upper_probs).sample((num_samples,))
+        samples = upper_samples + upper_samples.transpose(-1, -2)
+        return samples, probs
 
 
 class CausalEmbeddingReverseDiffusion(nn.Module):
@@ -838,3 +1044,143 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
         orders = orders.reshape(num_samples, batch_size, num_nodes)
         priority = priority.reshape(num_samples, batch_size, num_nodes)
         return orders, priority
+
+
+class CausalTopoOrderDiffusionWithSkeleton(BakStyleSkeletonMixin, CausalTopoOrderDiffusion):
+    """Topo-order diffusion plus a bak-style unordered skeleton head."""
+
+    def __init__(
+        self,
+        *args,
+        skeleton_loss_weight: float = 1.0,
+        order_loss_weight: float = 1.0,
+        skeleton_decoder_layers: int = 2,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_skeleton_head(
+            d_model=kwargs["d_model"],
+            nhead=kwargs["nhead"],
+            dim_feedforward=kwargs["dim_feedforward"],
+            num_layers_skeleton=skeleton_decoder_layers,
+            dropout=kwargs.get("dropout", 0.0),
+            skeleton_loss_weight=skeleton_loss_weight,
+            order_loss_weight=order_loss_weight,
+            device=kwargs.get("device", None),
+            dtype=kwargs.get("dtype", None),
+        )
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        if graph is None:
+            output = super().forward(target_data, graph=graph, mask=mask, is_training=is_training)
+            output["skeleton_logits"] = self._skeleton_logits_from_data(target_data, mask=mask)
+            return output
+
+        clean_orders = None
+        if self.order_loss_weight != 0:
+            node_repr, clean_orders = self._encode_ordered_data(
+                target_data,
+                graph=graph,
+                mask=mask,
+            )
+            order_loss = self._training_losses_per_batch(node_repr)
+        else:
+            order_loss = torch.zeros(target_data.size(0), device=target_data.device, dtype=target_data.dtype)
+
+        if self.skeleton_loss_weight != 0:
+            skeleton_logits = self._skeleton_logits_from_data(target_data, mask=mask)
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            skeleton_logits = None
+            skeleton_loss = torch.zeros_like(order_loss)
+        return {
+            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "order_loss": order_loss,
+            "skeleton_loss": skeleton_loss,
+            "clean_orders": clean_orders,
+            "skeleton_logits": skeleton_logits,
+        }
+
+
+class CausalPriorityTopoOrderDiffusionWithSkeleton(
+    BakStyleSkeletonMixin,
+    CausalPriorityTopoOrderDiffusion,
+):
+    """Priority-conditioned topo diffusion plus a bak-style skeleton head."""
+
+    def __init__(
+        self,
+        *args,
+        skeleton_loss_weight: float = 1.0,
+        order_loss_weight: float = 1.0,
+        skeleton_decoder_layers: int = 2,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_skeleton_head(
+            d_model=kwargs["d_model"],
+            nhead=kwargs["nhead"],
+            dim_feedforward=kwargs["dim_feedforward"],
+            num_layers_skeleton=skeleton_decoder_layers,
+            dropout=kwargs.get("dropout", 0.0),
+            skeleton_loss_weight=skeleton_loss_weight,
+            order_loss_weight=order_loss_weight,
+            device=kwargs.get("device", None),
+            dtype=kwargs.get("dtype", None),
+        )
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        if graph is None:
+            output = super().forward(target_data, graph=graph, mask=mask, is_training=is_training)
+            output["skeleton_logits"] = self._skeleton_logits_from_data(target_data, mask=mask)
+            return output
+
+        clean_orders = None
+        priority = None
+        if self.order_loss_weight != 0:
+            node_repr, priority_ordered, clean_orders, priority = self._encode_priority_ordered_data(
+                target_data,
+                graph=graph,
+                mask=mask,
+            )
+            order_loss = self._training_losses_per_batch_with_priority(
+                node_repr,
+                priority_start=priority_ordered,
+            )
+        else:
+            order_loss = torch.zeros(target_data.size(0), device=target_data.device, dtype=target_data.dtype)
+
+        if self.skeleton_loss_weight != 0:
+            skeleton_logits = self._skeleton_logits_from_data(target_data, mask=mask)
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            skeleton_logits = None
+            skeleton_loss = torch.zeros_like(order_loss)
+        return {
+            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "order_loss": order_loss,
+            "skeleton_loss": skeleton_loss,
+            "clean_orders": clean_orders,
+            "priority": priority,
+            "skeleton_logits": skeleton_logits,
+        }

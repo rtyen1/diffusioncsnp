@@ -18,8 +18,11 @@ from ml2_meta_causal_discovery.models.causaltransformernp import (
     CsivaDecoder,
 )
 from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+    CausalSkeletonDecoder,
     CausalTopoOrderDiffusion,
+    CausalTopoOrderDiffusionWithSkeleton,
     CausalPriorityTopoOrderDiffusion,
+    CausalPriorityTopoOrderDiffusionWithSkeleton,
 )
 try:
     from ml2_meta_causal_discovery.models.causaltransformernp import CausalProbabilisticARDecoder
@@ -208,7 +211,14 @@ def npf_main(args):
         [i for i in val_files if i.suffix == ".hdf5"], max_node_num=args.num_nodes
     )
 
-    topo_decoders = {"topo_diffusion", "topo_priority_diffusion"}
+    order_decoders = {
+        "topo_diffusion",
+        "topo_priority_diffusion",
+        "topo_diffusion_skeleton",
+        "topo_priority_diffusion_skeleton",
+    }
+    skeleton_only_decoders = {"topo_skeleton"}
+    topo_like_decoders = order_decoders | skeleton_only_decoders
     use_bfloat16 = args.topo_bfloat16
     model_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
 
@@ -217,11 +227,11 @@ def npf_main(args):
         emb_depth=1,
         dim_feedforward=args.dim_feedforward,
         nhead=args.nhead,
-        dropout=args.topo_dropout if args.decoder in topo_decoders else 0.0,
+        dropout=args.topo_dropout if args.decoder in topo_like_decoders else 0.0,
         num_layers_encoder=args.num_layers_encoder,
         num_layers_decoder=(
             args.topo_denoise_layers
-            if args.decoder in topo_decoders
+            if args.decoder in order_decoders
             else args.num_layers_decoder
         ),
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -240,6 +250,16 @@ def npf_main(args):
         topo_beam_size=args.topo_beam_size,
         topo_priority_scale_init=args.topo_priority_scale_init,
     )
+    if args.decoder in {
+        "topo_skeleton",
+        "topo_diffusion_skeleton",
+        "topo_priority_diffusion_skeleton",
+    }:
+        TNPD_KWARGS.update(
+            skeleton_loss_weight=args.skeleton_loss_weight,
+            order_loss_weight=args.order_loss_weight,
+            skeleton_decoder_layers=args.skeleton_decoder_layers,
+        )
 
     if args.decoder == "probabilistic":
         module = CausalProbabilisticDecoder
@@ -255,14 +275,21 @@ def npf_main(args):
         module = CsivaDecoder
     elif args.decoder == "transformer":
         module = AviciDecoder
+    elif args.decoder == "topo_skeleton":
+        module = CausalSkeletonDecoder
     elif args.decoder == "topo_diffusion":
         module = CausalTopoOrderDiffusion
     elif args.decoder == "topo_priority_diffusion":
         module = CausalPriorityTopoOrderDiffusion
+    elif args.decoder == "topo_diffusion_skeleton":
+        module = CausalTopoOrderDiffusionWithSkeleton
+    elif args.decoder == "topo_priority_diffusion_skeleton":
+        module = CausalPriorityTopoOrderDiffusionWithSkeleton
     else:
         raise ValueError(
             "Decoder must be probabilistic, probabilistic_ar, autoregressive, "
-            "transformer, topo_diffusion or topo_priority_diffusion"
+            "transformer, topo_skeleton, topo_diffusion, topo_priority_diffusion, "
+            "topo_diffusion_skeleton or topo_priority_diffusion_skeleton"
         )
 
     model_1d = partial(
@@ -344,13 +371,19 @@ def npf_main(args):
         start_epoch=start_epoch,
     )
     trainer.train()
-    if args.decoder in topo_decoders:
+    if args.decoder in order_decoders:
         metric_dict = trainer.test_single_epoch(
             test_loader=trainer.test_loader,
             metric_dict={},
             calc_metrics=False,
         )
         metric_dict.update(evaluate_topo_order_model(trainer, num_samples=1))
+    elif args.decoder in skeleton_only_decoders:
+        metric_dict = trainer.test_single_epoch(
+            test_loader=trainer.test_loader,
+            metric_dict={},
+            calc_metrics=False,
+        )
     else:
         metric_dict = trainer.test_single_epoch(
             test_loader=trainer.test_loader,

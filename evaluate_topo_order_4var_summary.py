@@ -152,18 +152,29 @@ def load_model(
         config = json.load(f)
 
     module = config.get("module", "probabilistic")
-    if module in {"topo_diffusion", "topo_priority_diffusion"}:
+    if module in {
+        "topo_diffusion",
+        "topo_priority_diffusion",
+        "topo_diffusion_skeleton",
+        "topo_priority_diffusion_skeleton",
+    }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalPriorityTopoOrderDiffusionWithSkeleton,
             CausalTopoOrderDiffusion,
+            CausalTopoOrderDiffusionWithSkeleton,
             CausalPriorityTopoOrderDiffusion,
         )
 
-        topo_cls = (
-            CausalPriorityTopoOrderDiffusion
-            if module == "topo_priority_diffusion"
-            else CausalTopoOrderDiffusion
-        )
-        model = topo_cls(
+        if module == "topo_priority_diffusion":
+            topo_cls = CausalPriorityTopoOrderDiffusion
+        elif module == "topo_diffusion_skeleton":
+            topo_cls = CausalTopoOrderDiffusionWithSkeleton
+        elif module == "topo_priority_diffusion_skeleton":
+            topo_cls = CausalPriorityTopoOrderDiffusionWithSkeleton
+        else:
+            topo_cls = CausalTopoOrderDiffusion
+
+        topo_kwargs = dict(
             d_model=config["d_model"],
             emb_depth=1,
             dim_feedforward=config["dim_feedforward"],
@@ -184,6 +195,15 @@ def load_model(
             topo_priority_scale_init=config.get("topo_priority_scale_init", -2.0),
             device=device,
             dtype=th.float32,
+        )
+        if module in {"topo_diffusion_skeleton", "topo_priority_diffusion_skeleton"}:
+            topo_kwargs.update(
+                skeleton_loss_weight=config.get("skeleton_loss_weight", 1.0),
+                order_loss_weight=config.get("order_loss_weight", 1.0),
+                skeleton_decoder_layers=config.get("skeleton_decoder_layers", 2),
+            )
+        model = topo_cls(
+            **topo_kwargs,
         ).to(device)
     else:
         CausalProbabilisticDecoder, CausalProbabilisticARDecoder = import_decoder_classes(source, bak_path)

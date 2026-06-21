@@ -312,6 +312,11 @@ class CausalClassifierTrainer:
                 metric_dict = {
                     "train loss": loss.mean().item(),
                 }
+                if isinstance(logits, dict):
+                    if "order_loss" in logits:
+                        metric_dict["train order loss"] = logits["order_loss"].mean().item()
+                    if "skeleton_loss" in logits:
+                        metric_dict["train skeleton loss"] = logits["skeleton_loss"].mean().item()
                 if i % 10000 == 0 and i > 0:
                     # don't do validation with autoregressive as its too expensive
                     if self.model.__class__.__name__ != "CausalAutoregressiveDecoder":

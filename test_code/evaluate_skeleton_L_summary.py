@@ -327,35 +327,77 @@ def load_model(
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    CausalProbabilisticDecoder, CausalProbabilisticARDecoder = import_decoder_classes(source, bak_path)
     module = config.get("module", "probabilistic")
-    kwargs = dict(
-        d_model=config["d_model"],
-        emb_depth=1,
-        dim_feedforward=config["dim_feedforward"],
-        nhead=config["nhead"],
-        dropout=0.0,
-        num_layers_encoder=config["num_layers_encoder"],
-        num_layers_decoder=config["num_layers_decoder"],
-        num_nodes=config["num_nodes"],
-        n_perm_samples=config.get("n_perm_samples", 25),
-        sinkhorn_iter=config.get("sinkhorn_iter", 300),
-        use_positional_encoding=config["use_positional_encoding"],
-        device=device,
-        dtype=th.float32,
-    )
-    if module == "probabilistic":
-        model = CausalProbabilisticDecoder(**kwargs).to(device)
-    elif module == "probabilistic_ar":
-        if CausalProbabilisticARDecoder is None:
-            raise ValueError(f"{source} model source does not contain CausalProbabilisticARDecoder.")
-        model = CausalProbabilisticARDecoder(
-            **kwargs,
-            num_topo_order_samples=config.get("num_topo_order_samples", 8),
-            ar_hidden_dim=config.get("ar_hidden_dim", None),
+    if module in {"topo_skeleton", "topo_diffusion_skeleton", "topo_priority_diffusion_skeleton"}:
+        from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalSkeletonDecoder,
+            CausalPriorityTopoOrderDiffusionWithSkeleton,
+            CausalTopoOrderDiffusionWithSkeleton,
+        )
+
+        if module == "topo_skeleton":
+            topo_cls = CausalSkeletonDecoder
+        elif module == "topo_priority_diffusion_skeleton":
+            topo_cls = CausalPriorityTopoOrderDiffusionWithSkeleton
+        else:
+            topo_cls = CausalTopoOrderDiffusionWithSkeleton
+        model = topo_cls(
+            d_model=config["d_model"],
+            emb_depth=1,
+            dim_feedforward=config["dim_feedforward"],
+            nhead=config["nhead"],
+            dropout=config.get("dropout", 0.0),
+            num_layers_encoder=config["num_layers_encoder"],
+            num_layers_decoder=config["num_layers_decoder"],
+            num_nodes=config["num_nodes"],
+            n_perm_samples=config.get("n_perm_samples", 25),
+            sinkhorn_iter=config.get("sinkhorn_iter", 300),
+            use_positional_encoding=config["use_positional_encoding"],
+            topo_num_timesteps=config.get("topo_num_timesteps", 7),
+            topo_sample_N=config.get("topo_sample_N", 1),
+            topo_transition=config.get("topo_transition", "riffle"),
+            topo_reverse=config.get("topo_reverse", "generalized_PL"),
+            topo_reverse_steps=config.get("topo_reverse_steps", None),
+            topo_beam_size=config.get("topo_beam_size", 20),
+            topo_priority_scale_init=config.get("topo_priority_scale_init", -2.0),
+            skeleton_loss_weight=config.get("skeleton_loss_weight", 1.0),
+            order_loss_weight=config.get("order_loss_weight", 1.0),
+            skeleton_decoder_layers=config.get("skeleton_decoder_layers", 2),
+            device=device,
+            dtype=th.float32,
         ).to(device)
     else:
-        raise ValueError(f"This script supports probabilistic/probabilistic_ar only, got module={module!r}.")
+        CausalProbabilisticDecoder, CausalProbabilisticARDecoder = import_decoder_classes(source, bak_path)
+        kwargs = dict(
+            d_model=config["d_model"],
+            emb_depth=1,
+            dim_feedforward=config["dim_feedforward"],
+            nhead=config["nhead"],
+            dropout=0.0,
+            num_layers_encoder=config["num_layers_encoder"],
+            num_layers_decoder=config["num_layers_decoder"],
+            num_nodes=config["num_nodes"],
+            n_perm_samples=config.get("n_perm_samples", 25),
+            sinkhorn_iter=config.get("sinkhorn_iter", 300),
+            use_positional_encoding=config["use_positional_encoding"],
+            device=device,
+            dtype=th.float32,
+        )
+        if module == "probabilistic":
+            model = CausalProbabilisticDecoder(**kwargs).to(device)
+        elif module == "probabilistic_ar":
+            if CausalProbabilisticARDecoder is None:
+                raise ValueError(f"{source} model source does not contain CausalProbabilisticARDecoder.")
+            model = CausalProbabilisticARDecoder(
+                **kwargs,
+                num_topo_order_samples=config.get("num_topo_order_samples", 8),
+                ar_hidden_dim=config.get("ar_hidden_dim", None),
+            ).to(device)
+        else:
+            raise ValueError(
+                "This script supports probabilistic/probabilistic_ar and "
+                f"*_skeleton topo models, got module={module!r}."
+            )
 
     try:
         state_dict = th.load(model_path, map_location=device, weights_only=True)
@@ -376,8 +418,12 @@ def decode_l_probs_batch(
     x = standardize_batch(data_batch, standardize=standardize)
     inputs = th.tensor(x, dtype=th.float32, device=device)
     with th.no_grad():
-        if hasattr(model, "_encode_decode"):
+        if hasattr(model, "_skeleton_logits_from_data"):
+            logits = model._skeleton_logits_from_data(inputs, mask=None)
+            edge_probs = th.sigmoid(logits).detach().cpu().numpy().astype(np.float64)
+        elif hasattr(model, "_encode_decode"):
             L_param, _, _ = model._encode_decode(inputs, mask=None)
+            edge_probs = th.sigmoid(L_param).detach().cpu().numpy().astype(np.float64)
         else:
             if inputs.dim() == 3:
                 target_data = inputs.unsqueeze(-1)
@@ -385,7 +431,7 @@ def decode_l_probs_batch(
                 target_data = inputs
             representation = model.encode(target_data=target_data, mask=None).squeeze(2)
             L_param, _ = model.decode(representation=representation, mask=None)
-        edge_probs = th.sigmoid(L_param).detach().cpu().numpy().astype(np.float64)
+            edge_probs = th.sigmoid(L_param).detach().cpu().numpy().astype(np.float64)
     for b in range(edge_probs.shape[0]):
         np.fill_diagonal(edge_probs[b], 0.0)
     return edge_probs
@@ -438,9 +484,28 @@ def method_specs(args: argparse.Namespace) -> List[Dict[str, str]]:
                     "source": args.ar_model_source,
                 }
             )
-    unknown = sorted(set(methods) - {"bak", "ar"})
+    if "topo_skeleton" in methods:
+        checkpoints = parse_checkpoints(
+            explicit=args.topo_checkpoints,
+            single=args.topo_checkpoint,
+            start=args.topo_checkpoint_start,
+            end=args.topo_checkpoint_end,
+            prefix=args.topo_checkpoint_prefix,
+            suffix=args.topo_checkpoint_suffix,
+        )
+        for checkpoint in checkpoints:
+            specs.append(
+                {
+                    "method": args.topo_method_name,
+                    "run_name": args.topo_run_name,
+                    "checkpoint": checkpoint,
+                    "checkpoint_index": checkpoint_index(checkpoint),
+                    "source": "current",
+                }
+            )
+    unknown = sorted(set(methods) - {"bak", "ar", "topo_skeleton"})
     if unknown:
-        raise ValueError(f"Unknown methods: {unknown}. Use bak, ar, or bak,ar.")
+        raise ValueError(f"Unknown methods: {unknown}. Use bak, ar, topo_skeleton, or a comma-separated subset.")
     return specs
 
 
@@ -631,8 +696,8 @@ def save_metric_plots(summary: pd.DataFrame, plots_dir: Path, prefix: str) -> Li
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate skeleton learning from CSNP L_param only.")
-    parser.add_argument("--methods", type=str, default="bak,ar", help="Comma-separated subset of bak,ar.")
+    parser = argparse.ArgumentParser(description="Evaluate skeleton learning from CSNP L_param or topo skeleton logits.")
+    parser.add_argument("--methods", type=str, default="bak,ar", help="Comma-separated subset of bak,ar,topo_skeleton.")
 
     parser.add_argument(
         "--work_dir",
@@ -662,6 +727,14 @@ def main() -> None:
     parser.add_argument("--ar_checkpoint_prefix", type=str, default="model_")
     parser.add_argument("--ar_checkpoint_suffix", type=str, default=".pt")
     parser.add_argument("--ar_model_source", type=str, default="current", choices=["bak", "current"])
+    parser.add_argument("--topo_run_name", type=str, default="")
+    parser.add_argument("--topo_checkpoint", type=str, default="model_0.pt")
+    parser.add_argument("--topo_checkpoints", type=str, default="")
+    parser.add_argument("--topo_checkpoint_start", type=int, default=None)
+    parser.add_argument("--topo_checkpoint_end", type=int, default=None)
+    parser.add_argument("--topo_checkpoint_prefix", type=str, default="model_")
+    parser.add_argument("--topo_checkpoint_suffix", type=str, default=".pt")
+    parser.add_argument("--topo_method_name", type=str, default="topo_skeleton")
 
     parser.add_argument("--benchmark_kind", type=str, default="random_gp", choices=["random_gp", "fixed_graph"])
     parser.add_argument("--benchmark_root", type=str, default="benchmark_data_4var")
