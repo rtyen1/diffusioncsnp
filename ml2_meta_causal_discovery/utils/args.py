@@ -273,7 +273,11 @@ def retun_default_args(parser):
         "--topo_bfloat16",
         default=False,
         action="store_true",
-        help="Train topo_diffusion/topo_priority_diffusion in bfloat16 instead of float32.",
+        help=(
+            "Deprecated compatibility flag. It is ignored because causal "
+            "classification training now always keeps model parameters and "
+            "optimizer state in FP32."
+        ),
     )
     parser.add_argument(
         "--skeleton_loss_weight",

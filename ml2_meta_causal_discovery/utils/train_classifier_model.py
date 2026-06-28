@@ -69,6 +69,7 @@ class CausalClassifierTrainer:
         eval_max_batches: int = None,
         scheduler: th.optim.lr_scheduler = None,
         start_epoch: int = 0,
+        base_learning_rate: float = None,
         use_wandb: bool = True,
     ):
         self.train_dataset = train_dataset
@@ -80,7 +81,13 @@ class CausalClassifierTrainer:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.lr_warmup_ratio = lr_warmup_ratio
-        self.bfloat16 = bfloat16
+        if bfloat16:
+            print(
+                "[WARN] CausalClassifierTrainer no longer performs raw BF16 "
+                "parameter training; falling back to FP32."
+            )
+        self.bfloat16 = False
+        self.model.to(dtype=th.float32)
         self.save_dir = save_dir
         self.sample_size_min = sample_size_min
         self.sample_size_max = sample_size_max
@@ -91,7 +98,11 @@ class CausalClassifierTrainer:
         self.start_epoch = start_epoch
         self.use_wandb = use_wandb
 
-        self.learning_rate = self.optimizer.param_groups[0]["lr"]
+        self.learning_rate = (
+            float(base_learning_rate)
+            if base_learning_rate is not None
+            else float(self.optimizer.param_groups[0]["lr"])
+        )
 
         self.initialise_loaders()
 
@@ -140,22 +151,28 @@ class CausalClassifierTrainer:
             collate_fn=collator(),
         )
 
-    def apply_learning_rate_warmup(self, epoch, step, lr_warmup_steps, is_avici=False):
+    def apply_learning_rate_warmup(self, global_step, lr_warmup_steps, is_avici=False):
         """
         Warmup should be around 10% of the total steps.
 
         If the model is an Avici model, then we need top warmup the
         regularisation parameter as well.
         """
-        if epoch == 0 and step < lr_warmup_steps:
-            lr = step / lr_warmup_steps * self.learning_rate
+        if lr_warmup_steps <= 0:
+            return
+
+        if global_step < lr_warmup_steps:
+            lr = (global_step + 1) / lr_warmup_steps * self.learning_rate
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = lr
             if is_avici:
                 # Hard code to 1e-4
-                self.model.regulariser_lr = step / lr_warmup_steps * 1e-4
-        else:
-            pass
+                self.model.regulariser_lr = (global_step + 1) / lr_warmup_steps * 1e-4
+        elif global_step == lr_warmup_steps:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = self.learning_rate
+            if is_avici:
+                self.model.regulariser_lr = 1e-4
 
     def test_single_epoch(self, test_loader, metric_dict, calc_metrics=False, num_samples=100, check_acyclic=False):
         with th.no_grad():
@@ -280,8 +297,11 @@ class CausalClassifierTrainer:
         pbar = tqdm(train_loader, desc="Training")
         for i, data in enumerate(pbar):
             # Learning rate warmup
+            global_step = epoch * len(train_loader) + i
             self.apply_learning_rate_warmup(
-                epoch=epoch, step=i, lr_warmup_steps=lr_warmup_steps, is_avici=is_avici
+                global_step=global_step,
+                lr_warmup_steps=lr_warmup_steps,
+                is_avici=is_avici,
             )
             # Get the inputs and targets
             inputs, targets, attention_mask = data

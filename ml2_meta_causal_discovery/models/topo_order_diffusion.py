@@ -119,8 +119,15 @@ class BakStyleSkeletonMixin:
 
     def _skeleton_logits_from_data(self, target_data: Tensor, mask: Optional[Tensor]) -> Tensor:
         raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+        return self._skeleton_logits_from_node_repr(raw_node_repr, mask=mask)
+
+    def _skeleton_logits_from_node_repr(
+        self,
+        node_repr: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tensor:
         return self.skeleton_head(
-            raw_node_repr,
+            node_repr,
             padding_mask=self._decoder_mask(mask),
         )
 
@@ -542,6 +549,13 @@ class CausalTopoOrderDiffusion(CausalTNPEncoder):
             gather_idx = orders.unsqueeze(1).unsqueeze(-1).expand(-1, x.size(1), -1, x.size(-1))
             return torch.gather(x, 2, gather_idx)
         raise ValueError("Expected node data with shape [B, S, V] or [B, S, V, C].")
+
+    @staticmethod
+    def _reorder_node_repr(node_repr: Tensor, orders: Tensor) -> Tensor:
+        if node_repr.dim() != 3:
+            raise ValueError("Expected node representations with shape [B, V, D].")
+        gather_idx = orders.unsqueeze(-1).expand(-1, -1, node_repr.size(-1))
+        return torch.gather(node_repr, 1, gather_idx)
 
     @staticmethod
     def _reorder_mask(mask: Optional[Tensor], orders: Tensor) -> Optional[Tensor]:
@@ -1176,6 +1190,166 @@ class CausalPriorityTopoOrderDiffusionWithSkeleton(
         else:
             skeleton_logits = None
             skeleton_loss = torch.zeros_like(order_loss)
+        return {
+            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "order_loss": order_loss,
+            "skeleton_loss": skeleton_loss,
+            "clean_orders": clean_orders,
+            "priority": priority,
+            "skeleton_logits": skeleton_logits,
+        }
+
+
+class CausalTopoOrderDiffusionSingleEncoderWithSkeleton(
+    CausalTopoOrderDiffusionWithSkeleton,
+):
+    """Joint topo+skeleton model that encodes the raw dataset only once."""
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+
+        if graph is None:
+            was_training = self.reverse_model.training
+            self.reverse_model.eval()
+            try:
+                _, orders = self.diffusion_utils.p_sample_loop(
+                    raw_node_repr,
+                    self.reverse_model,
+                    deterministic=True,
+                )
+            finally:
+                self.reverse_model.train(was_training)
+            return {
+                "orders": orders,
+                "skeleton_logits": self._skeleton_logits_from_node_repr(
+                    raw_node_repr,
+                    mask=mask,
+                ),
+            }
+
+        clean_orders = None
+        if self.order_loss_weight != 0:
+            clean_orders = self._sample_batch_topological_orders(graph, mask=mask)
+            ordered_node_repr = self._reorder_node_repr(raw_node_repr, clean_orders)
+            order_loss = self._training_losses_per_batch(ordered_node_repr)
+        else:
+            order_loss = torch.zeros(
+                target_data.size(0),
+                device=target_data.device,
+                dtype=target_data.dtype,
+            )
+
+        if self.skeleton_loss_weight != 0:
+            skeleton_logits = self._skeleton_logits_from_node_repr(
+                raw_node_repr,
+                mask=mask,
+            )
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            skeleton_logits = None
+            skeleton_loss = torch.zeros_like(order_loss)
+
+        return {
+            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "order_loss": order_loss,
+            "skeleton_loss": skeleton_loss,
+            "clean_orders": clean_orders,
+            "skeleton_logits": skeleton_logits,
+        }
+
+
+class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
+    CausalPriorityTopoOrderDiffusionWithSkeleton,
+):
+    """Priority-conditioned joint model that encodes the raw dataset only once."""
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+
+        if graph is None:
+            priority = self._sample_priorities(
+                batch_size=raw_node_repr.size(0),
+                num_nodes=raw_node_repr.size(1),
+                device=raw_node_repr.device,
+                dtype=raw_node_repr.dtype,
+            )
+            was_training = self.reverse_model.training
+            self.reverse_model.eval()
+            try:
+                _, orders = self._p_sample_loop_with_priority(
+                    raw_node_repr,
+                    priority_start=priority,
+                    deterministic=True,
+                )
+            finally:
+                self.reverse_model.train(was_training)
+            return {
+                "orders": orders,
+                "priority": priority,
+                "skeleton_logits": self._skeleton_logits_from_node_repr(
+                    raw_node_repr,
+                    mask=mask,
+                ),
+            }
+
+        clean_orders = None
+        priority = None
+        if self.order_loss_weight != 0:
+            batch_size, num_nodes = raw_node_repr.shape[:2]
+            priority = self._sample_priorities(
+                batch_size=batch_size,
+                num_nodes=num_nodes,
+                device=raw_node_repr.device,
+                dtype=raw_node_repr.dtype,
+            )
+            clean_orders = self._sample_batch_priority_topological_orders(
+                graph,
+                priority=priority,
+                mask=mask,
+            )
+            ordered_node_repr = self._reorder_node_repr(raw_node_repr, clean_orders)
+            priority_ordered = self._reorder_priority(priority, clean_orders)
+            order_loss = self._training_losses_per_batch_with_priority(
+                ordered_node_repr,
+                priority_start=priority_ordered,
+            )
+        else:
+            order_loss = torch.zeros(
+                target_data.size(0),
+                device=target_data.device,
+                dtype=target_data.dtype,
+            )
+
+        if self.skeleton_loss_weight != 0:
+            skeleton_logits = self._skeleton_logits_from_node_repr(
+                raw_node_repr,
+                mask=mask,
+            )
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            skeleton_logits = None
+            skeleton_loss = torch.zeros_like(order_loss)
+
         return {
             "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
             "order_loss": order_loss,

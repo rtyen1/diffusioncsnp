@@ -157,10 +157,14 @@ def load_model(
         "topo_priority_diffusion",
         "topo_diffusion_skeleton",
         "topo_priority_diffusion_skeleton",
+        "topo_diffusion_skeleton_single_encoder",
+        "topo_priority_diffusion_skeleton_single_encoder",
     }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
             CausalTopoOrderDiffusion,
+            CausalTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalTopoOrderDiffusionWithSkeleton,
             CausalPriorityTopoOrderDiffusion,
         )
@@ -171,6 +175,10 @@ def load_model(
             topo_cls = CausalTopoOrderDiffusionWithSkeleton
         elif module == "topo_priority_diffusion_skeleton":
             topo_cls = CausalPriorityTopoOrderDiffusionWithSkeleton
+        elif module == "topo_diffusion_skeleton_single_encoder":
+            topo_cls = CausalTopoOrderDiffusionSingleEncoderWithSkeleton
+        elif module == "topo_priority_diffusion_skeleton_single_encoder":
+            topo_cls = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
         else:
             topo_cls = CausalTopoOrderDiffusion
 
@@ -196,7 +204,12 @@ def load_model(
             device=device,
             dtype=th.float32,
         )
-        if module in {"topo_diffusion_skeleton", "topo_priority_diffusion_skeleton"}:
+        if module in {
+            "topo_diffusion_skeleton",
+            "topo_priority_diffusion_skeleton",
+            "topo_diffusion_skeleton_single_encoder",
+            "topo_priority_diffusion_skeleton_single_encoder",
+        }:
             topo_kwargs.update(
                 skeleton_loss_weight=config.get("skeleton_loss_weight", 1.0),
                 order_loss_weight=config.get("order_loss_weight", 1.0),
@@ -317,9 +330,29 @@ def sample_topo_diffusion_orders(
     return_priority: bool = False,
 ) -> Any:
     inputs = encode_input(data, device=device, standardize=standardize)
-    priority_np: Optional[np.ndarray] = None
     with th.no_grad():
         node_repr = model._encode_raw_data(inputs, mask=None)
+    return sample_topo_diffusion_orders_from_repr(
+        model=model,
+        node_repr=node_repr,
+        num_order_samples=num_order_samples,
+        deterministic=deterministic,
+        beam=beam,
+        return_priority=return_priority,
+    )
+
+
+def sample_topo_diffusion_orders_from_repr(
+    *,
+    model: Any,
+    node_repr: th.Tensor,
+    num_order_samples: int,
+    deterministic: bool = False,
+    beam: bool = False,
+    return_priority: bool = False,
+) -> Any:
+    priority_np: Optional[np.ndarray] = None
+    with th.no_grad():
         was_training = model.reverse_model.training
         model.reverse_model.eval()
         try:

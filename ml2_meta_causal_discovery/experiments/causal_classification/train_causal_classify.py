@@ -18,8 +18,10 @@ from ml2_meta_causal_discovery.models.causaltransformernp import (
     CsivaDecoder,
 )
 from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+    CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalSkeletonDecoder,
     CausalTopoOrderDiffusion,
+    CausalTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalTopoOrderDiffusionWithSkeleton,
     CausalPriorityTopoOrderDiffusion,
     CausalPriorityTopoOrderDiffusionWithSkeleton,
@@ -139,6 +141,8 @@ def load_training_checkpoint(
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     move_optimizer_state_to_param_device_and_dtype(optimizer)
+    if checkpoint.get("bfloat16", False):
+        print("Converting resumed BF16 model/optimizer state to FP32.")
 
     scheduler_state = checkpoint.get("scheduler_state_dict")
     if scheduler is not None and scheduler_state is not None:
@@ -216,11 +220,18 @@ def npf_main(args):
         "topo_priority_diffusion",
         "topo_diffusion_skeleton",
         "topo_priority_diffusion_skeleton",
+        "topo_diffusion_skeleton_single_encoder",
+        "topo_priority_diffusion_skeleton_single_encoder",
     }
     skeleton_only_decoders = {"topo_skeleton"}
     topo_like_decoders = order_decoders | skeleton_only_decoders
-    use_bfloat16 = args.topo_bfloat16
-    model_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+    if args.topo_bfloat16:
+        print(
+            "[WARN] --topo_bfloat16 is deprecated and ignored. "
+            "Model parameters, optimizer state, inputs, and training all use FP32."
+        )
+    use_bfloat16 = False
+    model_dtype = torch.float32
 
     TNPD_KWARGS = dict(
         d_model=args.dim_model,
@@ -254,6 +265,8 @@ def npf_main(args):
         "topo_skeleton",
         "topo_diffusion_skeleton",
         "topo_priority_diffusion_skeleton",
+        "topo_diffusion_skeleton_single_encoder",
+        "topo_priority_diffusion_skeleton_single_encoder",
     }:
         TNPD_KWARGS.update(
             skeleton_loss_weight=args.skeleton_loss_weight,
@@ -285,11 +298,17 @@ def npf_main(args):
         module = CausalTopoOrderDiffusionWithSkeleton
     elif args.decoder == "topo_priority_diffusion_skeleton":
         module = CausalPriorityTopoOrderDiffusionWithSkeleton
+    elif args.decoder == "topo_diffusion_skeleton_single_encoder":
+        module = CausalTopoOrderDiffusionSingleEncoderWithSkeleton
+    elif args.decoder == "topo_priority_diffusion_skeleton_single_encoder":
+        module = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
     else:
         raise ValueError(
             "Decoder must be probabilistic, probabilistic_ar, autoregressive, "
             "transformer, topo_skeleton, topo_diffusion, topo_priority_diffusion, "
-            "topo_diffusion_skeleton or topo_priority_diffusion_skeleton"
+            "topo_diffusion_skeleton, topo_priority_diffusion_skeleton, "
+            "topo_diffusion_skeleton_single_encoder or "
+            "topo_priority_diffusion_skeleton_single_encoder"
         )
 
     model_1d = partial(
@@ -369,6 +388,7 @@ def npf_main(args):
         eval_max_batches=args.eval_max_batches,
         scheduler=scheduler,
         start_epoch=start_epoch,
+        base_learning_rate=args.learning_rate,
     )
     trainer.train()
     if args.decoder in order_decoders:

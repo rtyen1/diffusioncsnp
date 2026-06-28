@@ -328,10 +328,18 @@ def load_model(
         config = json.load(f)
 
     module = config.get("module", "probabilistic")
-    if module in {"topo_skeleton", "topo_diffusion_skeleton", "topo_priority_diffusion_skeleton"}:
+    if module in {
+        "topo_skeleton",
+        "topo_diffusion_skeleton",
+        "topo_priority_diffusion_skeleton",
+        "topo_diffusion_skeleton_single_encoder",
+        "topo_priority_diffusion_skeleton_single_encoder",
+    }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalSkeletonDecoder,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
+            CausalTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalTopoOrderDiffusionWithSkeleton,
         )
 
@@ -339,6 +347,10 @@ def load_model(
             topo_cls = CausalSkeletonDecoder
         elif module == "topo_priority_diffusion_skeleton":
             topo_cls = CausalPriorityTopoOrderDiffusionWithSkeleton
+        elif module == "topo_diffusion_skeleton_single_encoder":
+            topo_cls = CausalTopoOrderDiffusionSingleEncoderWithSkeleton
+        elif module == "topo_priority_diffusion_skeleton_single_encoder":
+            topo_cls = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
         else:
             topo_cls = CausalTopoOrderDiffusionWithSkeleton
         model = topo_cls(
