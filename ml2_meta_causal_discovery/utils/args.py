@@ -180,6 +180,16 @@ def retun_default_args(parser):
         help="Number of nodes in the graph.",
     )
     parser.add_argument(
+        "--variable_num_nodes",
+        default=False,
+        action="store_true",
+        help=(
+            "Train without node padding. Each batch is sampled from one node-count "
+            "bucket, while different batches may have different node counts. "
+            "--num_nodes is still written to the config for compatibility."
+        ),
+    )
+    parser.add_argument(
         "--nhead",
         "-head",
         default=8,

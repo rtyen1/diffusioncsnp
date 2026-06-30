@@ -202,17 +202,26 @@ def npf_main(args):
     models_root = resolve_models_root(args, work_dir)
     results_root = resolve_results_root(args, work_dir)
     data_dir = synth_data_root / args.data_file
+    if args.variable_num_nodes and args.use_positional_encoding:
+        raise ValueError(
+            "--variable_num_nodes requires --use_positional_encoding to be disabled."
+        )
+
     # Get the training and validation datasets
     train_dir = data_dir / "train"
     train_files = list(train_dir.iterdir())
-    dataset = MultipleFileDatasetWithPadding(
-        [i for i in train_files if i.suffix == ".hdf5"], max_node_num=args.num_nodes
+    dataset_cls = MultipleFileDataset if args.variable_num_nodes else MultipleFileDatasetWithPadding
+    dataset_kwargs = {} if args.variable_num_nodes else {"max_node_num": args.num_nodes}
+    dataset = dataset_cls(
+        [i for i in train_files if i.suffix == ".hdf5"],
+        **dataset_kwargs,
     )
     val_dir = data_dir / "val"
     val_files = list(val_dir.iterdir())
     # Only use like 1000 samples for validation
-    val_dataset = MultipleFileDatasetWithPadding(
-        [i for i in val_files if i.suffix == ".hdf5"], max_node_num=args.num_nodes
+    val_dataset = dataset_cls(
+        [i for i in val_files if i.suffix == ".hdf5"],
+        **dataset_kwargs,
     )
 
     order_decoders = {
@@ -389,6 +398,7 @@ def npf_main(args):
         scheduler=scheduler,
         start_epoch=start_epoch,
         base_learning_rate=args.learning_rate,
+        variable_num_nodes=args.variable_num_nodes,
     )
     trainer.train()
     if args.decoder in order_decoders:

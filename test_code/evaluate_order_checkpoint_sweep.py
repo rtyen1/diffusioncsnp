@@ -40,6 +40,7 @@ from evaluate_topo_order_4var_summary import (  # noqa: E402
     sample_bak_orders,
     sample_topo_diffusion_orders,
     summarize_orders,
+    summarize_priority_order_match,
 )
 from test_code.evaluate_4var_order_classifier_vs_bak import load_classifier  # noqa: E402
 from test_code.train_4var_order_classifier import (  # noqa: E402
@@ -57,7 +58,12 @@ COMMON_METRICS = [
     "mean_avg_violation_rate",
 ]
 CLASSIFIER_EXTRA_METRICS = ["mean_valid_mass"]
-PLOT_METRICS = COMMON_METRICS + CLASSIFIER_EXTRA_METRICS
+PRIORITY_EXTRA_METRICS = [
+    "mean_priority_exact_match",
+    "mean_priority_position_accuracy",
+    "mean_priority_pairwise_accuracy",
+]
+PLOT_METRICS = COMMON_METRICS + CLASSIFIER_EXTRA_METRICS + PRIORITY_EXTRA_METRICS
 
 
 def parse_checkpoints(
@@ -402,7 +408,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                                 metrics = summarize_orders(true_dag, sampled_orders)
                                 metrics.update(exact_metrics)
                             elif kind == "topo":
-                                sampled_orders = sample_topo_diffusion_orders(
+                                sampled_orders, priorities = sample_topo_diffusion_orders(
                                     model=model,
                                     data=data,
                                     num_order_samples=args.num_order_samples,
@@ -410,8 +416,17 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                                     standardize=args.standardize,
                                     deterministic=bool(spec.get("deterministic", False)),
                                     beam=bool(spec.get("beam", False)),
+                                    return_priority=True,
                                 )
                                 metrics = summarize_orders(true_dag, sampled_orders)
+                                if priorities is not None:
+                                    metrics.update(
+                                        summarize_priority_order_match(
+                                            true_dag,
+                                            sampled_orders,
+                                            priorities,
+                                        )
+                                    )
                                 order_dist = bak_distribution_from_samples(sampled_orders, order_strings)
                             else:
                                 sampled_orders = sample_bak_orders(
@@ -648,6 +663,9 @@ def main() -> None:
         "avg_num_violations",
         "avg_violation_rate",
         "valid_mass",
+        "priority_exact_match",
+        "priority_position_accuracy",
+        "priority_pairwise_accuracy",
     ]]
     base_cols = [c for c in aggregate.columns if not c.startswith("mean_")]
     aggregate = aggregate[base_cols + [c for c in keep_metric_cols if c in aggregate.columns]]

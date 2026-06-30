@@ -3,6 +3,7 @@ Utils to take care of the data loading an processing.
 """
 import itertools
 import random
+from collections import defaultdict
 from typing import Optional, Tuple
 
 import dill
@@ -75,7 +76,7 @@ def transformer_classifier_split_withpadding(
 ):
     def mycollate(batch):
 
-        curr_sample_size = np.random.randint(sample_size_min, sample_size_max)
+        curr_sample_size = sample_size_min if sample_size_min == sample_size_max else np.random.randint(sample_size_min, sample_size_max)
         indices = np.random.choice(
             batch[0][0].shape[0], curr_sample_size, replace=False
         )
@@ -95,6 +96,67 @@ def transformer_classifier_split_withpadding(
         return inputs, targets, mask
 
     return mycollate
+
+
+def transformer_classifier_split_variable_nodes(
+    sample_size_min: int, sample_size_max: int
+):
+    def mycollate(batch):
+        curr_sample_size = sample_size_min if sample_size_min == sample_size_max else np.random.randint(sample_size_min, sample_size_max)
+        indices = np.random.choice(
+            batch[0][0].shape[0], curr_sample_size, replace=False
+        )
+
+        full_data = np.stack([i[0] for i in batch], axis=0)
+        full_target = np.stack([i[1] for i in batch], axis=0)
+        inputs = th.from_numpy(full_data).float()
+        targets = th.from_numpy(full_target).float()
+
+        inputs = inputs[:, indices]
+
+        return inputs, targets, None
+
+    return mycollate
+
+
+class SameNodeCountBatchSampler(th.utils.data.Sampler):
+    def __init__(self, dataset, batch_size: int, shuffle: bool = True, drop_last: bool = False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.buckets = defaultdict(list)
+
+        if not hasattr(dataset, "node_count"):
+            raise ValueError("SameNodeCountBatchSampler requires dataset.node_count(idx).")
+
+        for idx in range(len(dataset)):
+            self.buckets[int(dataset.node_count(idx))].append(idx)
+
+    def __iter__(self):
+        batches = []
+        for indices in self.buckets.values():
+            indices = list(indices)
+            if self.shuffle:
+                random.shuffle(indices)
+            for start in range(0, len(indices), self.batch_size):
+                batch = indices[start:start + self.batch_size]
+                if len(batch) == self.batch_size or (batch and not self.drop_last):
+                    batches.append(batch)
+
+        if self.shuffle:
+            random.shuffle(batches)
+
+        yield from batches
+
+    def __len__(self):
+        total = 0
+        for indices in self.buckets.values():
+            if self.drop_last:
+                total += len(indices) // self.batch_size
+            else:
+                total += (len(indices) + self.batch_size - 1) // self.batch_size
+        return total
 
 
 def transformer_infinite_classifier_split():
@@ -159,12 +221,25 @@ class MultipleFileDataset(th.utils.data.Dataset):
         super().__init__()
         self.all_data = []
         self.all_graphs = []
+        self.file_lengths = []
         for file in file_list:
             f = h5py.File(file, "r")
             self.all_data.append(f["data"])
             self.all_graphs.append(f["label"])
+            self.file_lengths.append(f["data"].shape[0])
         # Assume all datasets have the same size
         self.size_each_dataset = self.all_data[0].shape[0]
+        self.cumulative_lengths = np.cumsum(self.file_lengths)
+
+    def index_to_file_and_data(self, idx):
+        file_counter = int(np.searchsorted(self.cumulative_lengths, idx, side="right"))
+        prev = 0 if file_counter == 0 else int(self.cumulative_lengths[file_counter - 1])
+        data_idx = idx - prev
+        return data_idx, file_counter
+
+    def node_count(self, idx):
+        _, file_counter = self.index_to_file_and_data(idx)
+        return int(self.all_data[file_counter].shape[-1])
 
     def load_data(self, data_idx, file_counter):
         target_data = self.all_data[file_counter][data_idx]
@@ -178,8 +253,7 @@ class MultipleFileDataset(th.utils.data.Dataset):
 
     def __getitem__(self, idx):
         # Make sure the same item is not returned twice in parallel
-        file_counter = idx // self.size_each_dataset
-        data_idx = idx % self.size_each_dataset
+        data_idx, file_counter = self.index_to_file_and_data(idx)
 
         all_data = next(self.load_data(data_idx, file_counter))
         return all_data

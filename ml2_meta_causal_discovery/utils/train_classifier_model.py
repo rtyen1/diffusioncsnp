@@ -10,8 +10,11 @@ import torch as th
 import wandb
 from tqdm import tqdm
 
-from ml2_meta_causal_discovery.utils.datautils import \
-    transformer_classifier_split_withpadding
+from ml2_meta_causal_discovery.utils.datautils import (
+    SameNodeCountBatchSampler,
+    transformer_classifier_split_variable_nodes,
+    transformer_classifier_split_withpadding,
+)
 from ml2_meta_causal_discovery.utils.metrics import (auc_graph_scores,
                                                      expected_f1_score,
                                                      expected_shd,
@@ -71,6 +74,7 @@ class CausalClassifierTrainer:
         start_epoch: int = 0,
         base_learning_rate: float = None,
         use_wandb: bool = True,
+        variable_num_nodes: bool = False,
     ):
         self.train_dataset = train_dataset
         self.validation_dataset = validation_dataset
@@ -97,6 +101,7 @@ class CausalClassifierTrainer:
         self.scheduler = scheduler
         self.start_epoch = start_epoch
         self.use_wandb = use_wandb
+        self.variable_num_nodes = variable_num_nodes
 
         self.learning_rate = (
             float(base_learning_rate)
@@ -126,30 +131,73 @@ class CausalClassifierTrainer:
         )
 
     def initialise_loaders(self):
-        collator = partial(
-            transformer_classifier_split_withpadding,
-            sample_size_min=self.sample_size_min,
-            sample_size_max=self.sample_size_max,
-        )
-        # Get loaders
-        self.train_loader = th.utils.data.DataLoader(
-            self.train_dataset, batch_size=self.batch_size, shuffle=True,
-            num_workers=self.num_workers, pin_memory=True,
-            persistent_workers=False if self.num_workers == 0 else True,
-            collate_fn=collator(),
-        )
-        self.val_loader = th.utils.data.DataLoader(
-            self.validation_dataset, batch_size=self.eval_batch_size, shuffle=True,
-            num_workers=self.num_workers, pin_memory=True,
-            persistent_workers=False if self.num_workers == 0 else True,
-            collate_fn=collator(),
-        )
-        self.test_loader = th.utils.data.DataLoader(
-            self.test_dataset, batch_size=self.eval_batch_size, shuffle=True,
-            num_workers=self.num_workers, pin_memory=True,
-            persistent_workers=False if self.num_workers == 0 else True,
-            collate_fn=collator(),
-        )
+        if self.variable_num_nodes:
+            collator = partial(
+                transformer_classifier_split_variable_nodes,
+                sample_size_min=self.sample_size_min,
+                sample_size_max=self.sample_size_max,
+            )
+            self.train_loader = th.utils.data.DataLoader(
+                self.train_dataset,
+                batch_sampler=SameNodeCountBatchSampler(
+                    self.train_dataset,
+                    batch_size=self.batch_size,
+                    shuffle=True,
+                ),
+                num_workers=self.num_workers,
+                pin_memory=True,
+                persistent_workers=False if self.num_workers == 0 else True,
+                collate_fn=collator(),
+            )
+            self.val_loader = th.utils.data.DataLoader(
+                self.validation_dataset,
+                batch_sampler=SameNodeCountBatchSampler(
+                    self.validation_dataset,
+                    batch_size=self.eval_batch_size,
+                    shuffle=False,
+                ),
+                num_workers=self.num_workers,
+                pin_memory=True,
+                persistent_workers=False if self.num_workers == 0 else True,
+                collate_fn=collator(),
+            )
+            self.test_loader = th.utils.data.DataLoader(
+                self.test_dataset,
+                batch_sampler=SameNodeCountBatchSampler(
+                    self.test_dataset,
+                    batch_size=self.eval_batch_size,
+                    shuffle=False,
+                ),
+                num_workers=self.num_workers,
+                pin_memory=True,
+                persistent_workers=False if self.num_workers == 0 else True,
+                collate_fn=collator(),
+            )
+        else:
+            collator = partial(
+                transformer_classifier_split_withpadding,
+                sample_size_min=self.sample_size_min,
+                sample_size_max=self.sample_size_max,
+            )
+            # Get loaders
+            self.train_loader = th.utils.data.DataLoader(
+                self.train_dataset, batch_size=self.batch_size, shuffle=True,
+                num_workers=self.num_workers, pin_memory=True,
+                persistent_workers=False if self.num_workers == 0 else True,
+                collate_fn=collator(),
+            )
+            self.val_loader = th.utils.data.DataLoader(
+                self.validation_dataset, batch_size=self.eval_batch_size, shuffle=True,
+                num_workers=self.num_workers, pin_memory=True,
+                persistent_workers=False if self.num_workers == 0 else True,
+                collate_fn=collator(),
+            )
+            self.test_loader = th.utils.data.DataLoader(
+                self.test_dataset, batch_size=self.eval_batch_size, shuffle=True,
+                num_workers=self.num_workers, pin_memory=True,
+                persistent_workers=False if self.num_workers == 0 else True,
+                collate_fn=collator(),
+            )
 
     def apply_learning_rate_warmup(self, global_step, lr_warmup_steps, is_avici=False):
         """
@@ -223,7 +271,8 @@ class CausalClassifierTrainer:
             # Log the test loss
             n_eval = len(test_loader.dataset)
             if self.eval_max_batches is not None:
-                n_eval = min(n_eval, self.eval_max_batches * test_loader.batch_size)
+                loader_batch_size = test_loader.batch_size or self.eval_batch_size
+                n_eval = min(n_eval, self.eval_max_batches * loader_batch_size)
             n_eval = max(n_eval, 1)
             loss = all_loss / n_eval
             metric_dict.update(
@@ -267,7 +316,8 @@ class CausalClassifierTrainer:
         # accuracy = all_preds / len(val_loader.dataset)
         n_eval = len(val_loader.dataset)
         if self.eval_max_batches is not None:
-            n_eval = min(n_eval, self.eval_max_batches * val_loader.batch_size)
+            loader_batch_size = val_loader.batch_size or self.eval_batch_size
+            n_eval = min(n_eval, self.eval_max_batches * loader_batch_size)
         n_eval = max(n_eval, 1)
         loss = all_loss / n_eval
         metric_dict.update(
