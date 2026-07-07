@@ -27,7 +27,7 @@ import argparse
 import json
 import math
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import h5py
 import numpy as np
 import tensorflow as tf
-from tqdm import trange
+from tqdm import tqdm, trange
 
 from ml2_meta_causal_discovery.datasets.functions_generator import GPFunctionGenerator
 
@@ -778,7 +778,7 @@ def main() -> None:
             )
 
     if args.workers == 1:
-        for job in shard_jobs:
+        for job in tqdm(shard_jobs, desc="HDF5 shards", unit="shard"):
             write_shard(**job)
         return
 
@@ -789,7 +789,12 @@ def main() -> None:
         mp_context=context,
     ) as executor:
         futures = [executor.submit(write_shard, **job) for job in shard_jobs]
-        for future in futures:
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="HDF5 shards",
+            unit="shard",
+        ):
             future.result()
 
 
