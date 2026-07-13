@@ -570,6 +570,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_order_samples", type=int, default=200)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--standardize", action="store_true", default=True)
     parser.add_argument("--no_standardize", action="store_false", dest="standardize")
     parser.add_argument("--results_dir", type=str, required=True)
@@ -605,6 +606,11 @@ def main() -> None:
     print(f"Wrote aggregate summary: {aggregate_path}")
     print(f"Wrote SEM summary:       {by_sem_path}")
     print(f"Wrote detailed summary:  {detailed_path}")
+    if "n_ok" in aggregate.columns and int(aggregate["n_ok"].sum()) == 0:
+        raise RuntimeError(
+            "All evaluations failed: aggregate n_ok is 0. "
+            "Re-run with --print_errors to inspect the first failures."
+        )
 
     plot_node_counts = parse_int_list(args.plot_node_counts) if args.plot_node_counts else None
     plot_sample_sizes = parse_int_list(args.plot_sample_sizes) if args.plot_sample_sizes else None
