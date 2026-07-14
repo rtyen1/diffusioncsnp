@@ -201,6 +201,52 @@ class RunningSummary:
         return pd.DataFrame(rows)
 
 
+AGGREGATE_GROUP_COLS = [
+    "benchmark", "node_count", "sample_size", "method", "checkpoint", "checkpoint_index", "mode"
+]
+BY_SEM_GROUP_COLS = [
+    "benchmark", "node_count", "sample_size", "sem_type", "method", "checkpoint", "checkpoint_index", "mode"
+]
+DETAILED_GROUP_COLS = [
+    "benchmark", "node_count", "sample_size", "sem_type", "file", "method", "checkpoint", "checkpoint_index", "mode"
+]
+
+
+def checkpoint_stem(checkpoint: str) -> str:
+    return Path(checkpoint).stem
+
+
+def checkpoint_output_paths(results_dir: Path, prefix: str, checkpoint: str) -> Tuple[Path, Path, Path]:
+    ckpt_dir = results_dir / "checkpoints"
+    stem = checkpoint_stem(checkpoint)
+    return (
+        ckpt_dir / f"{prefix}_{stem}_aggregate.csv",
+        ckpt_dir / f"{prefix}_{stem}_by_sem.csv",
+        ckpt_dir / f"{prefix}_{stem}_detailed.csv",
+    )
+
+
+def checkpoint_result_is_complete(aggregate_path: Path, by_sem_path: Path, detailed_path: Path) -> bool:
+    if not (aggregate_path.exists() and by_sem_path.exists() and detailed_path.exists()):
+        return False
+    try:
+        aggregate = pd.read_csv(aggregate_path)
+        pd.read_csv(by_sem_path, nrows=1)
+        pd.read_csv(detailed_path, nrows=1)
+    except Exception:
+        return False
+    if aggregate.empty or "n_ok" not in aggregate.columns:
+        return False
+    return int(aggregate["n_ok"].sum()) > 0
+
+
+def concat_csv_files(paths: Sequence[Path]) -> pd.DataFrame:
+    frames = [pd.read_csv(path) for path in paths if path.exists()]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def skeleton_prob_from_node_repr(model: Any, node_repr: torch.Tensor) -> np.ndarray:
     if not hasattr(model, "_skeleton_logits_from_node_repr"):
         raise ValueError("Model does not expose _skeleton_logits_from_node_repr.")
@@ -297,6 +343,9 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         raise ValueError(f"Unknown eval modes: {sorted(unknown_modes)}")
 
     sample_sizes = parse_int_list(args.sample_sizes)
+    results_dir = Path(args.results_dir).expanduser().resolve()
+    checkpoint_dir = results_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     files_by_d = discover_variable_h5_files(
         root=benchmark_root,
         split=args.split,
@@ -310,15 +359,9 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
             else:
                 raise FileNotFoundError(f"No hdf5 files found for D={d} under {benchmark_root / args.split}")
 
-    aggregate = RunningSummary(
-        ["benchmark", "node_count", "sample_size", "method", "checkpoint", "checkpoint_index", "mode"]
-    )
-    by_sem = RunningSummary(
-        ["benchmark", "node_count", "sample_size", "sem_type", "method", "checkpoint", "checkpoint_index", "mode"]
-    )
-    detailed = RunningSummary(
-        ["benchmark", "node_count", "sample_size", "sem_type", "file", "method", "checkpoint", "checkpoint_index", "mode"]
-    )
+    aggregate_paths: List[Path] = []
+    by_sem_paths: List[Path] = []
+    detailed_paths: List[Path] = []
 
     print("=" * 100)
     print("Variable-node joint checkpoint sweep")
@@ -334,6 +377,19 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
 
     start = time.time()
     for checkpoint_idx, checkpoint in enumerate(checkpoints, start=1):
+        aggregate_path, by_sem_path, detailed_path = checkpoint_output_paths(
+            results_dir,
+            args.summary_prefix,
+            checkpoint,
+        )
+        if args.resume_existing and checkpoint_result_is_complete(aggregate_path, by_sem_path, detailed_path):
+            print("=" * 100)
+            print(f"[{checkpoint_idx}/{len(checkpoints)}] Skip completed checkpoint: {checkpoint}")
+            aggregate_paths.append(aggregate_path)
+            by_sem_paths.append(by_sem_path)
+            detailed_paths.append(detailed_path)
+            continue
+
         checkpoint_path = models_root / args.run_name / checkpoint
         if not checkpoint_path.exists():
             if args.skip_missing_checkpoints:
@@ -353,6 +409,9 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         )
         print(f"loaded: {loaded_path}")
         ckpt_index = checkpoint_index(checkpoint)
+        ckpt_aggregate = RunningSummary(AGGREGATE_GROUP_COLS)
+        ckpt_by_sem = RunningSummary(BY_SEM_GROUP_COLS)
+        ckpt_detailed = RunningSummary(DETAILED_GROUP_COLS)
 
         for mode in modes:
             for d in node_counts:
@@ -417,13 +476,13 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                                         mode=mode,
                                         threshold=args.threshold,
                                     )
-                                    aggregate.add_ok(base_group, metrics)
-                                    by_sem.add_ok(sem_group, metrics)
-                                    detailed.add_ok(detail_group, metrics)
+                                    ckpt_aggregate.add_ok(base_group, metrics)
+                                    ckpt_by_sem.add_ok(sem_group, metrics)
+                                    ckpt_detailed.add_ok(detail_group, metrics)
                                 except Exception as exc:
-                                    aggregate.add_error(base_group)
-                                    by_sem.add_error(sem_group)
-                                    detailed.add_error(detail_group)
+                                    ckpt_aggregate.add_error(base_group)
+                                    ckpt_by_sem.add_error(sem_group)
+                                    ckpt_detailed.add_error(detail_group)
                                     if args.print_errors:
                                         print(
                                             f"    [ERROR] D={d} n={sample_size} "
@@ -436,9 +495,36 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         if device == "cuda":
             torch.cuda.empty_cache()
 
+        ckpt_aggregate_frame = ckpt_aggregate.to_frame()
+        ckpt_by_sem_frame = ckpt_by_sem.to_frame()
+        ckpt_detailed_frame = ckpt_detailed.to_frame()
+        aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+        ckpt_aggregate_frame.to_csv(aggregate_path, index=False)
+        ckpt_by_sem_frame.to_csv(by_sem_path, index=False)
+        ckpt_detailed_frame.to_csv(detailed_path, index=False)
+        print(f"Wrote checkpoint aggregate: {aggregate_path}")
+        print(f"Wrote checkpoint SEM:       {by_sem_path}")
+        print(f"Wrote checkpoint detailed:  {detailed_path}")
+        if (
+            ckpt_aggregate_frame.empty
+            or "n_ok" not in ckpt_aggregate_frame.columns
+            or int(ckpt_aggregate_frame["n_ok"].sum()) == 0
+        ):
+            raise RuntimeError(
+                f"All evaluations failed for {checkpoint}: checkpoint n_ok is 0. "
+                "Re-run with --print_errors to inspect the first failures."
+            )
+        aggregate_paths.append(aggregate_path)
+        by_sem_paths.append(by_sem_path)
+        detailed_paths.append(detailed_path)
+
     print("=" * 100)
     print(f"Finished. elapsed={time.time() - start:.1f}s")
-    return aggregate.to_frame(), by_sem.to_frame(), detailed.to_frame()
+    return (
+        concat_csv_files(aggregate_paths),
+        concat_csv_files(by_sem_paths),
+        concat_csv_files(detailed_paths),
+    )
 
 
 def save_metric_plots(
@@ -583,6 +669,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_datasets_per_node", type=int, default=None)
     parser.add_argument("--skip_missing", action="store_true")
     parser.add_argument("--skip_missing_checkpoints", action="store_true")
+    parser.add_argument("--resume_existing", action="store_true")
     parser.add_argument("--print_errors", action="store_true")
     return parser.parse_args()
 
@@ -606,7 +693,7 @@ def main() -> None:
     print(f"Wrote aggregate summary: {aggregate_path}")
     print(f"Wrote SEM summary:       {by_sem_path}")
     print(f"Wrote detailed summary:  {detailed_path}")
-    if "n_ok" in aggregate.columns and int(aggregate["n_ok"].sum()) == 0:
+    if aggregate.empty or "n_ok" not in aggregate.columns or int(aggregate["n_ok"].sum()) == 0:
         raise RuntimeError(
             "All evaluations failed: aggregate n_ok is 0. "
             "Re-run with --print_errors to inspect the first failures."
