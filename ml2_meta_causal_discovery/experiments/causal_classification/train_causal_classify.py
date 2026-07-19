@@ -269,6 +269,7 @@ def npf_main(args):
         topo_reverse_steps=args.topo_reverse_steps,
         topo_beam_size=args.topo_beam_size,
         topo_priority_scale_init=args.topo_priority_scale_init,
+        topo_priority_mode=args.topo_priority_mode,
     )
     if args.decoder in {
         "topo_skeleton",

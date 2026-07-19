@@ -201,6 +201,7 @@ def load_model(
             topo_reverse_steps=config.get("topo_reverse_steps", None),
             topo_beam_size=config.get("topo_beam_size", 20),
             topo_priority_scale_init=config.get("topo_priority_scale_init", -2.0),
+            topo_priority_mode=config.get("topo_priority_mode", "random"),
             device=device,
             dtype=th.float32,
         )

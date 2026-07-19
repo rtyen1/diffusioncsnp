@@ -280,6 +280,17 @@ def retun_default_args(parser):
         help="Initial log-gate for priority column residual in --decoder topo_priority_diffusion.",
     )
     parser.add_argument(
+        "--topo_priority_mode",
+        default="random",
+        choices=["random", "fixed_node_order"],
+        type=str,
+        help=(
+            "Priority source for topo_priority_diffusion. random samples "
+            "u ~ Uniform(0,1)^D for each dataset; fixed_node_order uses "
+            "u_i=i/(D-1), so Kahn tie-breaks choose smaller node indices first."
+        ),
+    )
+    parser.add_argument(
         "--topo_bfloat16",
         default=False,
         action="store_true",

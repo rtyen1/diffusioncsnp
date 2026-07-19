@@ -707,6 +707,7 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
         topo_reverse_steps: Optional[list[int]] = None,
         topo_beam_size: int = 20,
         topo_priority_scale_init: float = -2.0,
+        topo_priority_mode: str = "random",
         device=None,
         dtype=None,
         mlp_use_bias: bool = False,
@@ -714,6 +715,11 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
     ):
         if topo_reverse != "generalized_PL":
             raise ValueError("CausalPriorityTopoOrderDiffusion currently supports generalized_PL only.")
+        if topo_priority_mode not in {"random", "fixed_node_order"}:
+            raise ValueError(
+                "topo_priority_mode must be 'random' or 'fixed_node_order', "
+                f"got {topo_priority_mode!r}."
+            )
         super().__init__(
             d_model=d_model,
             emb_depth=emb_depth,
@@ -737,6 +743,7 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
             mlp_use_bias=mlp_use_bias,
             **kwargs,
         )
+        self.topo_priority_mode = topo_priority_mode
         self.reverse_model = PriorityCausalEmbeddingReverseDiffusion(
             d_model=d_model,
             nhead=nhead,
@@ -756,7 +763,13 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
     def _sample_priorities(self, batch_size: int, num_nodes: int, device, dtype) -> Tensor:
         # Keep exogenous priorities in fp32 even when the denoiser uses bf16.
         # This avoids unnecessary ties from low-precision priority sampling.
-        return torch.rand((batch_size, num_nodes), device=device, dtype=torch.float32)
+        if self.topo_priority_mode == "random":
+            return torch.rand((batch_size, num_nodes), device=device, dtype=torch.float32)
+        if num_nodes <= 1:
+            base = torch.zeros((num_nodes,), device=device, dtype=torch.float32)
+        else:
+            base = torch.arange(num_nodes, device=device, dtype=torch.float32) / float(num_nodes - 1)
+        return base.unsqueeze(0).expand(batch_size, -1)
 
     def _sample_batch_priority_topological_orders(
         self,
