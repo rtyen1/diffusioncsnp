@@ -1371,3 +1371,196 @@ class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
             "priority": priority,
             "skeleton_logits": skeleton_logits,
         }
+
+
+class CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton(
+    CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
+):
+    """Single-encoder joint model with priority fused into topo node embeddings.
+
+    The skeleton head still consumes the raw causal encoder representation in
+    the original node order. The topo diffusion branch first fuses each node's
+    priority into that node representation, then reorders the fused topo
+    representation by the clean priority-Kahn order before applying the
+    diffusion loss.
+    """
+
+    def __init__(
+        self,
+        *args,
+        topo_priority_node_emb_dim: int = 16,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        d_model = kwargs.get("d_model", args[0] if args else None)
+        if d_model is None:
+            raise ValueError("d_model is required for priority node fusion.")
+
+        factory_kwargs = {}
+        if kwargs.get("device", None) is not None:
+            factory_kwargs["device"] = kwargs["device"]
+        if kwargs.get("dtype", None) is not None:
+            factory_kwargs["dtype"] = kwargs["dtype"]
+
+        self.topo_priority_node_emb_dim = topo_priority_node_emb_dim
+        self.topo_priority_node_embedder = nn.Sequential(
+            nn.Linear(2, topo_priority_node_emb_dim, **factory_kwargs),
+            nn.GELU(),
+            nn.Linear(topo_priority_node_emb_dim, topo_priority_node_emb_dim, **factory_kwargs),
+        )
+        self.topo_priority_node_fuse = nn.Sequential(
+            nn.Linear(d_model + topo_priority_node_emb_dim, d_model, **factory_kwargs),
+            nn.GELU(),
+            nn.Linear(d_model, d_model, **factory_kwargs),
+        )
+
+    @staticmethod
+    def _priority_node_features(priority: Tensor) -> Tensor:
+        priority = priority.float()
+        rank = priority.argsort(dim=-1).argsort(dim=-1).to(dtype=priority.dtype)
+        denom = max(priority.size(-1) - 1, 1)
+        rank = rank / denom
+        return torch.stack([priority, rank], dim=-1)
+
+    def _fuse_priority_into_topo_node_repr(
+        self,
+        raw_node_repr: Tensor,
+        priority: Tensor,
+    ) -> Tensor:
+        priority_features = self._priority_node_features(priority).to(
+            device=raw_node_repr.device,
+            dtype=raw_node_repr.dtype,
+        )
+        priority_emb = self.topo_priority_node_embedder(priority_features)
+        return self.topo_priority_node_fuse(
+            torch.cat([raw_node_repr, priority_emb], dim=-1)
+        )
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+
+        if graph is None:
+            priority = self._sample_priorities(
+                batch_size=raw_node_repr.size(0),
+                num_nodes=raw_node_repr.size(1),
+                device=raw_node_repr.device,
+                dtype=raw_node_repr.dtype,
+            )
+            topo_node_repr = self._fuse_priority_into_topo_node_repr(
+                raw_node_repr,
+                priority,
+            )
+            was_training = self.reverse_model.training
+            self.reverse_model.eval()
+            try:
+                _, orders = self._p_sample_loop_with_priority(
+                    topo_node_repr,
+                    priority_start=priority,
+                    deterministic=True,
+                )
+            finally:
+                self.reverse_model.train(was_training)
+            return {
+                "orders": orders,
+                "priority": priority,
+                "skeleton_logits": self._skeleton_logits_from_node_repr(
+                    raw_node_repr,
+                    mask=mask,
+                ),
+            }
+
+        clean_orders = None
+        priority = None
+        if self.order_loss_weight != 0:
+            batch_size, num_nodes = raw_node_repr.shape[:2]
+            priority = self._sample_priorities(
+                batch_size=batch_size,
+                num_nodes=num_nodes,
+                device=raw_node_repr.device,
+                dtype=raw_node_repr.dtype,
+            )
+            clean_orders = self._sample_batch_priority_topological_orders(
+                graph,
+                priority=priority,
+                mask=mask,
+            )
+            topo_node_repr = self._fuse_priority_into_topo_node_repr(
+                raw_node_repr,
+                priority,
+            )
+            ordered_topo_node_repr = self._reorder_node_repr(
+                topo_node_repr,
+                clean_orders,
+            )
+            priority_ordered = self._reorder_priority(priority, clean_orders)
+            order_loss = self._training_losses_per_batch_with_priority(
+                ordered_topo_node_repr,
+                priority_start=priority_ordered,
+            )
+        else:
+            order_loss = torch.zeros(
+                target_data.size(0),
+                device=target_data.device,
+                dtype=target_data.dtype,
+            )
+
+        if self.skeleton_loss_weight != 0:
+            skeleton_logits = self._skeleton_logits_from_node_repr(
+                raw_node_repr,
+                mask=mask,
+            )
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            skeleton_logits = None
+            skeleton_loss = torch.zeros_like(order_loss)
+
+        return {
+            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "order_loss": order_loss,
+            "skeleton_loss": skeleton_loss,
+            "clean_orders": clean_orders,
+            "priority": priority,
+            "skeleton_logits": skeleton_logits,
+        }
+
+    def sample(self, target_data: Tensor, num_samples: int = 1, mask: Optional[Tensor] = None):
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+        batch_size, num_nodes, d_model = raw_node_repr.shape
+        priority = self._sample_priorities(
+            batch_size=num_samples * batch_size,
+            num_nodes=num_nodes,
+            device=raw_node_repr.device,
+            dtype=raw_node_repr.dtype,
+        )
+        topo_node_repr = (
+            raw_node_repr.unsqueeze(0)
+            .expand(num_samples, batch_size, num_nodes, d_model)
+            .reshape(num_samples * batch_size, num_nodes, d_model)
+        )
+        topo_node_repr = self._fuse_priority_into_topo_node_repr(
+            topo_node_repr,
+            priority,
+        )
+        was_training = self.reverse_model.training
+        self.reverse_model.eval()
+        try:
+            _, orders = self._p_sample_loop_with_priority(
+                topo_node_repr,
+                priority_start=priority,
+                deterministic=False,
+            )
+        finally:
+            self.reverse_model.train(was_training)
+        orders = orders.reshape(num_samples, batch_size, num_nodes)
+        priority = priority.reshape(num_samples, batch_size, num_nodes)
+        return orders, priority

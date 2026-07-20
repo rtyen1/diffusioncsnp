@@ -159,8 +159,10 @@ def load_model(
         "topo_priority_diffusion_skeleton",
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
+        "topo_priority_node_diffusion_skeleton_single_encoder",
     }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
             CausalTopoOrderDiffusion,
@@ -179,6 +181,8 @@ def load_model(
             topo_cls = CausalTopoOrderDiffusionSingleEncoderWithSkeleton
         elif module == "topo_priority_diffusion_skeleton_single_encoder":
             topo_cls = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
+        elif module == "topo_priority_node_diffusion_skeleton_single_encoder":
+            topo_cls = CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton
         else:
             topo_cls = CausalTopoOrderDiffusion
 
@@ -210,6 +214,7 @@ def load_model(
             "topo_priority_diffusion_skeleton",
             "topo_diffusion_skeleton_single_encoder",
             "topo_priority_diffusion_skeleton_single_encoder",
+            "topo_priority_node_diffusion_skeleton_single_encoder",
         }:
             topo_kwargs.update(
                 skeleton_loss_weight=config.get("skeleton_loss_weight", 1.0),
@@ -372,6 +377,11 @@ def sample_topo_diffusion_orders_from_repr(
                         .expand(num_order_samples, batch_size, num_nodes, d_model)
                         .reshape(num_order_samples * batch_size, num_nodes, d_model)
                     )
+                    if hasattr(model, "_fuse_priority_into_topo_node_repr"):
+                        node_repr = model._fuse_priority_into_topo_node_repr(
+                            node_repr,
+                            priority,
+                        )
                     _, orders = model._p_sample_beam_search_with_priority(
                         node_repr,
                         priority_start=priority,
@@ -395,6 +405,11 @@ def sample_topo_diffusion_orders_from_repr(
                     .expand(num_order_samples, batch_size, num_nodes, d_model)
                     .reshape(num_order_samples * batch_size, num_nodes, d_model)
                 )
+                if hasattr(model, "_fuse_priority_into_topo_node_repr"):
+                    node_repr = model._fuse_priority_into_topo_node_repr(
+                        node_repr,
+                        priority,
+                    )
                 _, orders = model._p_sample_loop_with_priority(
                     node_repr,
                     priority_start=priority,

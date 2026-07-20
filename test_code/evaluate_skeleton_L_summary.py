@@ -334,8 +334,10 @@ def load_model(
         "topo_priority_diffusion_skeleton",
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
+        "topo_priority_node_diffusion_skeleton_single_encoder",
     }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalSkeletonDecoder,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
@@ -351,6 +353,8 @@ def load_model(
             topo_cls = CausalTopoOrderDiffusionSingleEncoderWithSkeleton
         elif module == "topo_priority_diffusion_skeleton_single_encoder":
             topo_cls = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
+        elif module == "topo_priority_node_diffusion_skeleton_single_encoder":
+            topo_cls = CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton
         else:
             topo_cls = CausalTopoOrderDiffusionWithSkeleton
         model = topo_cls(
@@ -372,6 +376,7 @@ def load_model(
             topo_reverse_steps=config.get("topo_reverse_steps", None),
             topo_beam_size=config.get("topo_beam_size", 20),
             topo_priority_scale_init=config.get("topo_priority_scale_init", -2.0),
+            topo_priority_mode=config.get("topo_priority_mode", "random"),
             skeleton_loss_weight=config.get("skeleton_loss_weight", 1.0),
             order_loss_weight=config.get("order_loss_weight", 1.0),
             skeleton_decoder_layers=config.get("skeleton_decoder_layers", 2),

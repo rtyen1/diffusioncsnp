@@ -18,6 +18,7 @@ from ml2_meta_causal_discovery.models.causaltransformernp import (
     CsivaDecoder,
 )
 from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+    CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalSkeletonDecoder,
     CausalTopoOrderDiffusion,
@@ -231,6 +232,7 @@ def npf_main(args):
         "topo_priority_diffusion_skeleton",
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
+        "topo_priority_node_diffusion_skeleton_single_encoder",
     }
     skeleton_only_decoders = {"topo_skeleton"}
     topo_like_decoders = order_decoders | skeleton_only_decoders
@@ -277,6 +279,7 @@ def npf_main(args):
         "topo_priority_diffusion_skeleton",
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
+        "topo_priority_node_diffusion_skeleton_single_encoder",
     }:
         TNPD_KWARGS.update(
             skeleton_loss_weight=args.skeleton_loss_weight,
@@ -312,13 +315,16 @@ def npf_main(args):
         module = CausalTopoOrderDiffusionSingleEncoderWithSkeleton
     elif args.decoder == "topo_priority_diffusion_skeleton_single_encoder":
         module = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
+    elif args.decoder == "topo_priority_node_diffusion_skeleton_single_encoder":
+        module = CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton
     else:
         raise ValueError(
             "Decoder must be probabilistic, probabilistic_ar, autoregressive, "
             "transformer, topo_skeleton, topo_diffusion, topo_priority_diffusion, "
             "topo_diffusion_skeleton, topo_priority_diffusion_skeleton, "
             "topo_diffusion_skeleton_single_encoder or "
-            "topo_priority_diffusion_skeleton_single_encoder"
+            "topo_priority_diffusion_skeleton_single_encoder, or "
+            "topo_priority_node_diffusion_skeleton_single_encoder"
         )
 
     model_1d = partial(
