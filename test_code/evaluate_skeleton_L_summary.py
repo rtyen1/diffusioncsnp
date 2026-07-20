@@ -335,11 +335,13 @@ def load_model(
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
         "topo_priority_node_diffusion_skeleton_single_encoder",
+        "source_layer_joint_skeleton_single_encoder",
     }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
             CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalSkeletonDecoder,
+            CausalSourceLayerJointSkeletonSingleEncoder,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
             CausalTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalTopoOrderDiffusionWithSkeleton,
@@ -355,9 +357,11 @@ def load_model(
             topo_cls = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
         elif module == "topo_priority_node_diffusion_skeleton_single_encoder":
             topo_cls = CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton
+        elif module == "source_layer_joint_skeleton_single_encoder":
+            topo_cls = CausalSourceLayerJointSkeletonSingleEncoder
         else:
             topo_cls = CausalTopoOrderDiffusionWithSkeleton
-        model = topo_cls(
+        topo_kwargs = dict(
             d_model=config["d_model"],
             emb_depth=1,
             dim_feedforward=config["dim_feedforward"],
@@ -382,7 +386,15 @@ def load_model(
             skeleton_decoder_layers=config.get("skeleton_decoder_layers", 2),
             device=device,
             dtype=th.float32,
-        ).to(device)
+        )
+        if module == "source_layer_joint_skeleton_single_encoder":
+            topo_kwargs.update(
+                source_threshold=config.get("source_threshold", 0.5),
+                source_pos_weight=config.get("source_pos_weight", 1.0),
+                skeleton_threshold=config.get("skeleton_threshold", 0.5),
+                source_use_global_context=config.get("source_use_global_context", True),
+            )
+        model = topo_cls(**topo_kwargs).to(device)
     else:
         CausalProbabilisticDecoder, CausalProbabilisticARDecoder = import_decoder_classes(source, bak_path)
         kwargs = dict(

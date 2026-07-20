@@ -126,6 +126,24 @@ def orient_skeleton_by_order(skeleton_prob: np.ndarray, order: np.ndarray, thres
     return dag
 
 
+def orient_skeleton_by_layer_id(
+    skeleton_prob: np.ndarray,
+    layer_id: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    layer_id = np.asarray(layer_id, dtype=int)
+    num_nodes = skeleton_prob.shape[0]
+    dag = np.zeros((num_nodes, num_nodes), dtype=int)
+    for i in range(num_nodes):
+        for j in range(i + 1, num_nodes):
+            if max(float(skeleton_prob[i, j]), float(skeleton_prob[j, i])) > threshold:
+                if layer_id[i] < layer_id[j]:
+                    dag[i, j] = 1
+                elif layer_id[j] < layer_id[i]:
+                    dag[j, i] = 1
+    return dag
+
+
 def joint_predict_cpdag(
     model: Any,
     data: np.ndarray,
@@ -140,6 +158,25 @@ def joint_predict_cpdag(
     with torch.no_grad():
         node_repr = model._encode_raw_data(inputs, mask=None)
     skeleton_prob = skeleton_prob_from_node_repr(model, node_repr, mask=None)
+    if hasattr(model, "_decode_source_layers_from_node_repr") and not hasattr(model, "reverse_model"):
+        valid_nodes = torch.ones(
+            node_repr.shape[:2],
+            dtype=torch.bool,
+            device=node_repr.device,
+        )
+        with torch.no_grad():
+            layer_ids, _, _ = model._decode_source_layers_from_node_repr(
+                node_repr,
+                valid_nodes=valid_nodes,
+            )
+        pred_dag = orient_skeleton_by_layer_id(
+            skeleton_prob,
+            layer_ids[0].detach().cpu().numpy(),
+            threshold,
+        )
+        pred_dir, pred_undir, _ = dag_to_cpdag_by_mec(pred_dag)
+        return pred_dir, pred_undir
+
     orders = sample_topo_diffusion_orders_from_repr(
         model=model,
         node_repr=node_repr,
@@ -201,9 +238,13 @@ def evaluate(args: argparse.Namespace) -> pd.DataFrame:
             device=device,
             bak_path=bak_path,
         )
-        if not hasattr(joint_model, "_skeleton_logits_from_node_repr") or not hasattr(joint_model, "reverse_model"):
+        has_order_sampler = (
+            hasattr(joint_model, "reverse_model")
+            or hasattr(joint_model, "_decode_source_layers_from_node_repr")
+        )
+        if not hasattr(joint_model, "_skeleton_logits_from_node_repr") or not has_order_sampler:
             raise ValueError(
-                "The joint method requires a topo diffusion model with a skeleton head "
+                "The joint method requires a topo/source-layer model with a skeleton head "
                 f"(loaded module={config.get('module')!r})."
             )
         joint_variant = (

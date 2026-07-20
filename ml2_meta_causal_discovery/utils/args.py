@@ -319,6 +319,48 @@ def retun_default_args(parser):
         help="Number of bak-style self-attention decoder layers for the skeleton head.",
     )
     parser.add_argument(
+        "--source_threshold",
+        default=0.5,
+        type=float,
+        help=(
+            "Sigmoid threshold for selecting all current source-layer nodes in "
+            "--decoder source_layer_joint_skeleton_single_encoder."
+        ),
+    )
+    parser.add_argument(
+        "--source_pos_weight",
+        default=1.0,
+        type=float,
+        help=(
+            "Positive-class BCE weight for source-layer multi-hot supervision in "
+            "--decoder source_layer_joint_skeleton_single_encoder."
+        ),
+    )
+    parser.add_argument(
+        "--skeleton_threshold",
+        default=0.5,
+        type=float,
+        help=(
+            "Sigmoid threshold for converting skeleton logits to edges before "
+            "source-layer orientation."
+        ),
+    )
+    parser.add_argument(
+        "--source_use_global_context",
+        default=True,
+        action="store_true",
+        help=(
+            "Add the valid-node mean representation as global context in the "
+            "source-layer decoder."
+        ),
+    )
+    parser.add_argument(
+        "--no_source_use_global_context",
+        dest="source_use_global_context",
+        action="store_false",
+        help="Disable global-context conditioning in the source-layer decoder.",
+    )
+    parser.add_argument(
         "--use_positional_encoding",
         "-upe",
         default=False,

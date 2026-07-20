@@ -111,6 +111,22 @@ class CausalClassifierTrainer:
 
         self.initialise_loaders()
 
+    @staticmethod
+    def _accumulate_tensor_metric(metric_sums, metric_counts, key, values):
+        if values is None:
+            return
+        if not th.is_tensor(values):
+            values = th.as_tensor(values)
+        values = values.detach().float().flatten()
+        metric_sums[key] = metric_sums.get(key, 0.0) + values.sum().cpu().item()
+        metric_counts[key] = metric_counts.get(key, 0) + int(values.numel())
+
+    def _finalize_tensor_metrics(self, metric_dict, prefix, metric_sums, metric_counts):
+        for key, total in metric_sums.items():
+            count = max(metric_counts.get(key, 0), 1)
+            metric_dict[f"{prefix} {key.replace('_', ' ')}"] = total / count
+        return metric_dict
+
     def checkpoint_state(self, epoch: int):
         return {
             "epoch": epoch + 1,
@@ -229,6 +245,8 @@ class CausalClassifierTrainer:
             self.model.eval()
             self.model.to(dtype)
             all_loss = 0
+            metric_sums = {}
+            metric_counts = {}
             for i, data in enumerate(tqdm(test_loader, desc="Testing")):
                 if self.eval_max_batches is not None and i >= self.eval_max_batches:
                     break
@@ -247,6 +265,27 @@ class CausalClassifierTrainer:
 
                 loss = self.model.calculate_loss(adj_logit, targets)
                 all_loss += th.sum(loss).cpu().item()
+                if isinstance(adj_logit, dict):
+                    self._accumulate_tensor_metric(
+                        metric_sums,
+                        metric_counts,
+                        "source_layer_loss",
+                        adj_logit.get("source_layer_loss"),
+                    )
+                    self._accumulate_tensor_metric(
+                        metric_sums,
+                        metric_counts,
+                        "skeleton_loss",
+                        adj_logit.get("skeleton_loss"),
+                    )
+                if hasattr(self.model, "evaluate_batch"):
+                    batch_metrics = self.model.evaluate_batch(
+                        inputs,
+                        graph=targets,
+                        mask=attention_mask,
+                    )
+                    for key, value in batch_metrics.items():
+                        self._accumulate_tensor_metric(metric_sums, metric_counts, key, value)
                 if calc_metrics:
                     predictions, _ = self.model.sample(
                         inputs, num_samples=num_samples, mask=attention_mask
@@ -280,6 +319,12 @@ class CausalClassifierTrainer:
                     "test_loss": loss,
                 }
             )
+            metric_dict = self._finalize_tensor_metrics(
+                metric_dict,
+                "test",
+                metric_sums,
+                metric_counts,
+            )
             dtype = th.bfloat16 if self.bfloat16 else th.float32
             self.model.train()
             self.model.to(dtype)
@@ -292,6 +337,8 @@ class CausalClassifierTrainer:
 
         all_loss = 0
         all_preds = 0
+        metric_sums = {}
+        metric_counts = {}
         for i, data in enumerate(tqdm(val_loader, desc="Validation")):
             if self.eval_max_batches is not None and i >= self.eval_max_batches:
                 break
@@ -310,6 +357,28 @@ class CausalClassifierTrainer:
 
             loss = self.model.calculate_loss(adj_logit, targets)
             all_loss += th.sum(loss).cpu().item()
+            if isinstance(adj_logit, dict):
+                self._accumulate_tensor_metric(
+                    metric_sums,
+                    metric_counts,
+                    "source_layer_loss",
+                    adj_logit.get("source_layer_loss"),
+                )
+                self._accumulate_tensor_metric(
+                    metric_sums,
+                    metric_counts,
+                    "skeleton_loss",
+                    adj_logit.get("skeleton_loss"),
+                )
+            if hasattr(self.model, "evaluate_batch"):
+                with th.no_grad():
+                    batch_metrics = self.model.evaluate_batch(
+                        inputs,
+                        graph=targets,
+                        mask=attention_mask,
+                    )
+                for key, value in batch_metrics.items():
+                    self._accumulate_tensor_metric(metric_sums, metric_counts, key, value)
             # pred = (adj_logit > 0.5).double()
             # all_preds += th.sum(pred == flat_target).cpu().item()
         # Log the validation loss
@@ -325,6 +394,12 @@ class CausalClassifierTrainer:
                 "val_loss": loss,
                 # "val_accuracy": accuracy,
             }
+        )
+        metric_dict = self._finalize_tensor_metrics(
+            metric_dict,
+            "val",
+            metric_sums,
+            metric_counts,
         )
         dtype = th.bfloat16 if self.bfloat16 else th.float32
         self.model.train()
@@ -385,6 +460,8 @@ class CausalClassifierTrainer:
                 if isinstance(logits, dict):
                     if "order_loss" in logits:
                         metric_dict["train order loss"] = logits["order_loss"].mean().item()
+                    if "source_layer_loss" in logits:
+                        metric_dict["train source-layer loss"] = logits["source_layer_loss"].mean().item()
                     if "skeleton_loss" in logits:
                         metric_dict["train skeleton loss"] = logits["skeleton_loss"].mean().item()
                 if i % 10000 == 0 and i > 0:

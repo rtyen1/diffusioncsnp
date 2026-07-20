@@ -160,11 +160,13 @@ def load_model(
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
         "topo_priority_node_diffusion_skeleton_single_encoder",
+        "source_layer_joint_skeleton_single_encoder",
     }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
             CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
+            CausalSourceLayerJointSkeletonSingleEncoder,
             CausalTopoOrderDiffusion,
             CausalTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalTopoOrderDiffusionWithSkeleton,
@@ -183,6 +185,8 @@ def load_model(
             topo_cls = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
         elif module == "topo_priority_node_diffusion_skeleton_single_encoder":
             topo_cls = CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton
+        elif module == "source_layer_joint_skeleton_single_encoder":
+            topo_cls = CausalSourceLayerJointSkeletonSingleEncoder
         else:
             topo_cls = CausalTopoOrderDiffusion
 
@@ -215,11 +219,19 @@ def load_model(
             "topo_diffusion_skeleton_single_encoder",
             "topo_priority_diffusion_skeleton_single_encoder",
             "topo_priority_node_diffusion_skeleton_single_encoder",
+            "source_layer_joint_skeleton_single_encoder",
         }:
             topo_kwargs.update(
                 skeleton_loss_weight=config.get("skeleton_loss_weight", 1.0),
                 order_loss_weight=config.get("order_loss_weight", 1.0),
                 skeleton_decoder_layers=config.get("skeleton_decoder_layers", 2),
+            )
+        if module == "source_layer_joint_skeleton_single_encoder":
+            topo_kwargs.update(
+                source_threshold=config.get("source_threshold", 0.5),
+                source_pos_weight=config.get("source_pos_weight", 1.0),
+                skeleton_threshold=config.get("skeleton_threshold", 0.5),
+                source_use_global_context=config.get("source_use_global_context", True),
             )
         model = topo_cls(
             **topo_kwargs,
@@ -359,6 +371,24 @@ def sample_topo_diffusion_orders_from_repr(
 ) -> Any:
     priority_np: Optional[np.ndarray] = None
     with th.no_grad():
+        if hasattr(model, "_decode_source_layers_from_node_repr") and not hasattr(model, "reverse_model"):
+            batch_size, num_nodes = node_repr.shape[:2]
+            valid_nodes = th.ones(
+                (batch_size, num_nodes),
+                dtype=th.bool,
+                device=node_repr.device,
+            )
+            layer_ids, _, _ = model._decode_source_layers_from_node_repr(
+                node_repr,
+                valid_nodes=valid_nodes,
+            )
+            orders = model._orders_from_layer_ids(layer_ids, valid_nodes)
+            orders = orders.repeat_interleave(num_order_samples, dim=0)
+            orders_np = orders.detach().cpu().numpy().astype(int)
+            if return_priority:
+                return orders_np, priority_np
+            return orders_np
+
         was_training = model.reverse_model.training
         model.reverse_model.eval()
         try:

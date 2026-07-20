@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -157,6 +157,438 @@ class BakStyleSkeletonMixin:
         pair_weight = pair_mask.to(dtype=loss.dtype)
         denom = pair_weight.flatten(1).sum(dim=1).clamp_min(1)
         return (loss * pair_weight).flatten(1).sum(dim=1) / denom
+
+
+class SourceLayerDecoder(nn.Module):
+    """Predict the current source-node set from remaining node representations."""
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        num_layers: int,
+        dropout: float,
+        use_global_context: bool = True,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+        factory_kwargs = {}
+        if device is not None:
+            factory_kwargs["device"] = device
+        if dtype is not None:
+            factory_kwargs["dtype"] = dtype
+
+        self.step_embedder = TimestepEmbedder(d_model, time_mlp=True)
+        self.remaining_embed = nn.Linear(1, d_model, **factory_kwargs)
+        self.use_global_context = use_global_context
+        self.global_proj = nn.Linear(d_model, d_model, **factory_kwargs)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+            bias=False,
+            device=device,
+            dtype=dtype,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.logit_head = nn.Sequential(
+            nn.Linear(d_model, d_model, **factory_kwargs),
+            nn.GELU(),
+            nn.Linear(d_model, 1, **factory_kwargs),
+        )
+
+    def forward(
+        self,
+        node_repr: Tensor,
+        remaining_mask: Tensor,
+        step: Tensor,
+        valid_node_mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        remaining_mask = remaining_mask.to(torch.bool)
+        if valid_node_mask is None:
+            valid_node_mask = remaining_mask
+        else:
+            valid_node_mask = valid_node_mask.to(torch.bool)
+
+        step_emb = self.step_embedder(step.to(device=node_repr.device)).to(dtype=node_repr.dtype)
+        remaining_emb = self.remaining_embed(
+            remaining_mask.unsqueeze(-1).to(dtype=node_repr.dtype)
+        )
+        x = node_repr + step_emb.unsqueeze(1) + remaining_emb
+
+        if self.use_global_context:
+            weight = valid_node_mask.unsqueeze(-1).to(dtype=node_repr.dtype)
+            denom = weight.sum(dim=1).clamp_min(1.0)
+            global_repr = (node_repr * weight).sum(dim=1) / denom
+            x = x + self.global_proj(global_repr).unsqueeze(1)
+
+        x = self.encoder(x, src_key_padding_mask=~remaining_mask)
+        logits = self.logit_head(x).squeeze(-1)
+        return logits.masked_fill(~remaining_mask, -1e9)
+
+
+class SourceLayerMixin:
+    @staticmethod
+    def _valid_nodes_from_decoder_mask(
+        mask: Optional[Tensor],
+        batch_size: int,
+        num_nodes: int,
+        device,
+    ) -> Tensor:
+        if mask is None:
+            return torch.ones((batch_size, num_nodes), dtype=torch.bool, device=device)
+        return mask[:, -1, :] > -1e20
+
+    @staticmethod
+    def _source_layers_from_graph(
+        graph: Tensor,
+        valid_nodes: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        batch_size, num_nodes, _ = graph.shape
+        source_targets = torch.zeros(
+            (batch_size, num_nodes, num_nodes),
+            dtype=torch.bool,
+            device=graph.device,
+        )
+        remaining_masks = torch.zeros_like(source_targets)
+        layer_ids = torch.full(
+            (batch_size, num_nodes),
+            fill_value=-1,
+            dtype=torch.long,
+            device=graph.device,
+        )
+        layer_counts = torch.zeros((batch_size,), dtype=torch.long, device=graph.device)
+
+        for b in range(batch_size):
+            remaining = valid_nodes[b].clone()
+            for step in range(num_nodes):
+                if not remaining.any():
+                    break
+                active_edges = (graph[b] > 0.5) & remaining.unsqueeze(1) & remaining.unsqueeze(0)
+                indegree = active_edges.to(torch.long).sum(dim=0)
+                source = remaining & (indegree == 0)
+                if not source.any():
+                    raise ValueError(
+                        "Cannot build source-layer labels: target graph contains a cycle "
+                        f"in batch item {b}."
+                    )
+                remaining_masks[b, step] = remaining
+                source_targets[b, step] = source
+                layer_ids[b, source] = step
+                layer_counts[b] += 1
+                remaining = remaining & ~source
+
+        return source_targets, remaining_masks, layer_ids, layer_counts
+
+    def _source_layer_loss_per_batch(
+        self,
+        node_repr: Tensor,
+        graph: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        batch_size, num_nodes = graph.shape[:2]
+        valid_nodes = self._valid_nodes_from_decoder_mask(
+            mask,
+            batch_size=batch_size,
+            num_nodes=num_nodes,
+            device=graph.device,
+        )
+        source_targets, remaining_masks, layer_ids, layer_counts = self._source_layers_from_graph(
+            graph=graph,
+            valid_nodes=valid_nodes,
+        )
+        loss_sum = torch.zeros((batch_size,), dtype=node_repr.dtype, device=node_repr.device)
+        pos_weight = torch.tensor(
+            float(self.source_pos_weight),
+            dtype=torch.float32,
+            device=node_repr.device,
+        )
+
+        for step in range(num_nodes):
+            active_batch = step < layer_counts
+            if not active_batch.any():
+                continue
+            active_idx = torch.nonzero(active_batch, as_tuple=False).flatten()
+            step_tensor = torch.full(
+                (active_idx.numel(),),
+                step,
+                dtype=torch.long,
+                device=node_repr.device,
+            )
+            remaining = remaining_masks[active_idx, step]
+            logits = self.source_layer_decoder(
+                node_repr[active_idx],
+                remaining_mask=remaining,
+                step=step_tensor,
+                valid_node_mask=valid_nodes[active_idx],
+            )
+            target = source_targets[active_idx, step].to(dtype=logits.dtype)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits.float(),
+                target.float(),
+                reduction="none",
+                pos_weight=pos_weight,
+            )
+            weight = remaining.to(dtype=loss.dtype)
+            denom = weight.sum(dim=1).clamp_min(1.0)
+            loss_sum[active_idx] += (loss * weight).sum(dim=1).to(loss_sum.dtype) / denom.to(loss_sum.dtype)
+
+        source_loss = loss_sum / layer_counts.clamp_min(1).to(dtype=loss_sum.dtype)
+        return source_loss, layer_ids, source_targets, layer_counts
+
+    def _decode_source_layers_from_node_repr(
+        self,
+        node_repr: Tensor,
+        valid_nodes: Tensor,
+        source_threshold: Optional[float] = None,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        threshold = self.source_threshold if source_threshold is None else source_threshold
+        batch_size, num_nodes = valid_nodes.shape
+        remaining = valid_nodes.clone()
+        layer_ids = torch.full(
+            (batch_size, num_nodes),
+            fill_value=-1,
+            dtype=torch.long,
+            device=node_repr.device,
+        )
+        layer_counts = torch.zeros((batch_size,), dtype=torch.long, device=node_repr.device)
+        last_logits = torch.full(
+            (batch_size, num_nodes),
+            fill_value=-1e9,
+            dtype=node_repr.dtype,
+            device=node_repr.device,
+        )
+
+        for step in range(num_nodes):
+            active_batch = remaining.any(dim=1)
+            if not active_batch.any():
+                break
+            active_idx = torch.nonzero(active_batch, as_tuple=False).flatten()
+            step_tensor = torch.full(
+                (active_idx.numel(),),
+                step,
+                dtype=torch.long,
+                device=node_repr.device,
+            )
+            logits = self.source_layer_decoder(
+                node_repr[active_idx],
+                remaining_mask=remaining[active_idx],
+                step=step_tensor,
+                valid_node_mask=valid_nodes[active_idx],
+            )
+            probs = torch.sigmoid(logits.float())
+            chosen = (probs > threshold) & remaining[active_idx]
+            empty = ~chosen.any(dim=1)
+            if empty.any():
+                fallback_logits = logits.masked_fill(~remaining[active_idx], -1e9)
+                fallback = fallback_logits.argmax(dim=1)
+                chosen[empty] = False
+                chosen[empty, fallback[empty]] = True
+
+            batch_ids = active_idx.unsqueeze(1).expand_as(chosen)
+            node_ids = torch.arange(num_nodes, device=node_repr.device).view(1, -1).expand_as(chosen)
+            layer_ids[batch_ids[chosen], node_ids[chosen]] = step
+            layer_counts[active_idx] += 1
+            remaining[active_idx] = remaining[active_idx] & ~chosen
+            last_logits[active_idx] = logits
+
+        return layer_ids, layer_counts, last_logits
+
+    @staticmethod
+    def _orders_from_layer_ids(layer_ids: Tensor, valid_nodes: Tensor) -> Tensor:
+        batch_size, num_nodes = layer_ids.shape
+        node_ids = torch.arange(num_nodes, device=layer_ids.device)
+        orders = torch.empty((batch_size, num_nodes), dtype=torch.long, device=layer_ids.device)
+        for b in range(batch_size):
+            valid_order = node_ids[valid_nodes[b]][
+                torch.argsort(layer_ids[b, valid_nodes[b]] * num_nodes + node_ids[valid_nodes[b]])
+            ]
+            invalid_order = node_ids[~valid_nodes[b]]
+            orders[b] = torch.cat([valid_order, invalid_order], dim=0)
+        return orders
+
+    @staticmethod
+    def _orient_skeleton_by_layer_ids(
+        skeleton_logits: Tensor,
+        layer_ids: Tensor,
+        valid_nodes: Tensor,
+        threshold: float,
+    ) -> Tensor:
+        probs = torch.sigmoid(skeleton_logits.float())
+        probs = (probs + probs.transpose(1, 2)) / 2.0
+        batch_size, num_nodes, _ = probs.shape
+        pred = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.float32, device=probs.device)
+        upper = torch.triu(
+            torch.ones((num_nodes, num_nodes), dtype=torch.bool, device=probs.device),
+            diagonal=1,
+        )
+        skeleton_edges = (probs > threshold) & upper.unsqueeze(0)
+        valid_pairs = valid_nodes.unsqueeze(1) & valid_nodes.unsqueeze(2)
+        skeleton_edges = skeleton_edges & valid_pairs
+        i_before_j = layer_ids.unsqueeze(2) < layer_ids.unsqueeze(1)
+        j_before_i = layer_ids.unsqueeze(1) < layer_ids.unsqueeze(2)
+        pred = pred.masked_fill(skeleton_edges & i_before_j, 1.0)
+        pred = pred.masked_fill((skeleton_edges & j_before_i).transpose(1, 2), 1.0)
+        return pred
+
+    @staticmethod
+    def _is_acyclic_batch(adj: Tensor, valid_nodes: Tensor) -> Tensor:
+        batch_size, num_nodes, _ = adj.shape
+        result = torch.ones((batch_size,), dtype=torch.bool, device=adj.device)
+        for b in range(batch_size):
+            remaining = valid_nodes[b].clone()
+            active_adj = (adj[b] > 0.5) & remaining.unsqueeze(1) & remaining.unsqueeze(0)
+            for _ in range(num_nodes):
+                if not remaining.any():
+                    break
+                indegree = active_adj.to(torch.long).sum(dim=0)
+                source = remaining & (indegree == 0)
+                if not source.any():
+                    result[b] = False
+                    break
+                active_adj[source, :] = False
+                active_adj[:, source] = False
+                remaining[source] = False
+        return result
+
+    @staticmethod
+    def _binary_precision_recall(
+        target: Tensor,
+        pred: Tensor,
+        mask: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        target = target.to(torch.bool) & mask
+        pred = pred.to(torch.bool) & mask
+        tp = (target & pred).flatten(1).sum(dim=1).float()
+        fp = (~target & pred & mask).flatten(1).sum(dim=1).float()
+        fn = (target & ~pred & mask).flatten(1).sum(dim=1).float()
+        precision = torch.where(tp + fp > 0, tp / (tp + fp), torch.zeros_like(tp))
+        recall = torch.where(tp + fn > 0, tp / (tp + fn), torch.zeros_like(tp))
+        f1 = torch.where(
+            precision + recall > 0,
+            2 * precision * recall / (precision + recall),
+            torch.zeros_like(precision),
+        )
+        return precision, recall, f1
+
+    def evaluate_batch(
+        self,
+        target_data: Tensor,
+        graph: Tensor,
+        mask: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]:
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+        batch_size, num_nodes = graph.shape[:2]
+        valid_nodes = self._valid_nodes_from_decoder_mask(
+            mask,
+            batch_size=batch_size,
+            num_nodes=num_nodes,
+            device=graph.device,
+        )
+        true_source_loss, true_layer_ids, _, true_layer_counts = self._source_layer_loss_per_batch(
+            raw_node_repr,
+            graph=graph,
+            mask=mask,
+        )
+        pred_layer_ids, pred_layer_counts, _ = self._decode_source_layers_from_node_repr(
+            raw_node_repr,
+            valid_nodes=valid_nodes,
+        )
+        skeleton_logits = self._skeleton_logits_from_node_repr(raw_node_repr, mask=mask)
+        skeleton_loss = self._skeleton_loss_per_batch(skeleton_logits, graph=graph, mask=mask)
+        pred_adj = self._orient_skeleton_by_layer_ids(
+            skeleton_logits,
+            layer_ids=pred_layer_ids,
+            valid_nodes=valid_nodes,
+            threshold=self.skeleton_threshold,
+        )
+
+        node_layer_accuracy = ((pred_layer_ids == true_layer_ids) | ~valid_nodes).float()
+        node_layer_accuracy = (node_layer_accuracy * valid_nodes.float()).sum(dim=1) / valid_nodes.float().sum(dim=1).clamp_min(1.0)
+        full_layering_accuracy = ((pred_layer_ids == true_layer_ids) | ~valid_nodes).all(dim=1).float()
+
+        max_layers = torch.maximum(true_layer_counts, pred_layer_counts).max().item()
+        source_precision_sum = torch.zeros((batch_size,), dtype=torch.float32, device=graph.device)
+        source_recall_sum = torch.zeros_like(source_precision_sum)
+        source_f1_sum = torch.zeros_like(source_precision_sum)
+        source_metric_count = torch.zeros_like(source_precision_sum)
+        for step in range(int(max_layers)):
+            active_layer = (step < true_layer_counts) | (step < pred_layer_counts)
+            true_set = (true_layer_ids == step) & valid_nodes
+            pred_set = (pred_layer_ids == step) & valid_nodes
+            tp = (true_set & pred_set).sum(dim=1).float()
+            fp = (~true_set & pred_set & valid_nodes).sum(dim=1).float()
+            fn = (true_set & ~pred_set & valid_nodes).sum(dim=1).float()
+            precision = torch.where(tp + fp > 0, tp / (tp + fp), torch.zeros_like(tp))
+            recall = torch.where(tp + fn > 0, tp / (tp + fn), torch.zeros_like(tp))
+            f1 = torch.where(
+                precision + recall > 0,
+                2 * precision * recall / (precision + recall),
+                torch.zeros_like(precision),
+            )
+            active_weight = active_layer.float()
+            source_precision_sum += precision * active_weight
+            source_recall_sum += recall * active_weight
+            source_f1_sum += f1 * active_weight
+            source_metric_count += active_weight
+        source_metric_count = source_metric_count.clamp_min(1.0)
+        source_precision = source_precision_sum / source_metric_count
+        source_recall = source_recall_sum / source_metric_count
+        source_f1 = source_f1_sum / source_metric_count
+
+        true_edge_mask = valid_nodes.unsqueeze(1) & valid_nodes.unsqueeze(2)
+        eye = torch.eye(num_nodes, dtype=torch.bool, device=graph.device).unsqueeze(0)
+        true_edge_mask = true_edge_mask & ~eye
+        final_precision, final_recall, _ = self._binary_precision_recall(
+            target=graph > 0.5,
+            pred=pred_adj > 0.5,
+            mask=true_edge_mask,
+        )
+        final_shd = ((graph > 0.5) ^ (pred_adj > 0.5)).to(torch.float32)
+        final_shd = (final_shd * true_edge_mask.float()).flatten(1).sum(dim=1)
+
+        upper = torch.triu(
+            torch.ones((num_nodes, num_nodes), dtype=torch.bool, device=graph.device),
+            diagonal=1,
+        ).unsqueeze(0)
+        pair_mask = upper & valid_nodes.unsqueeze(1) & valid_nodes.unsqueeze(2)
+        true_skeleton = ((graph > 0.5) | (graph.transpose(1, 2) > 0.5))
+        pred_skeleton = torch.sigmoid(skeleton_logits.float()) > self.skeleton_threshold
+        skeleton_precision, skeleton_recall, _ = self._binary_precision_recall(
+            target=true_skeleton,
+            pred=pred_skeleton,
+            mask=pair_mask,
+        )
+
+        topo_valid = torch.ones((batch_size,), dtype=torch.bool, device=graph.device)
+        edge_mask = (graph > 0.5) & true_edge_mask
+        for b in range(batch_size):
+            if edge_mask[b].any():
+                src, dst = torch.nonzero(edge_mask[b], as_tuple=True)
+                topo_valid[b] = (pred_layer_ids[b, src] < pred_layer_ids[b, dst]).all()
+
+        return {
+            "source_layer_loss": true_source_loss.detach(),
+            "node_layer_accuracy": node_layer_accuracy.detach(),
+            "full_layering_accuracy": full_layering_accuracy.detach(),
+            "source_layer_precision": source_precision.detach(),
+            "source_layer_recall": source_recall.detach(),
+            "source_layer_f1": source_f1.detach(),
+            "predicted_layer_count": pred_layer_counts.float().detach(),
+            "topo_order_validity": topo_valid.float().detach(),
+            "skeleton_loss": skeleton_loss.detach(),
+            "skeleton_precision": skeleton_precision.detach(),
+            "skeleton_recall": skeleton_recall.detach(),
+            "final_adjacency_acyclic": self._is_acyclic_batch(pred_adj, valid_nodes).float().detach(),
+            "final_shd": final_shd.detach(),
+            "final_edge_precision": final_precision.detach(),
+            "final_edge_recall": final_recall.detach(),
+        }
 
 
 class CausalSkeletonDecoder(BakStyleSkeletonMixin, CausalTNPEncoder):
@@ -1371,6 +1803,183 @@ class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
             "priority": priority,
             "skeleton_logits": skeleton_logits,
         }
+
+
+class CausalSourceLayerJointSkeletonSingleEncoder(
+    SourceLayerMixin,
+    BakStyleSkeletonMixin,
+    CausalTNPEncoder,
+):
+    """Joint source-layer and skeleton model with one shared data encoder."""
+
+    def __init__(
+        self,
+        d_model,
+        emb_depth,
+        dim_feedforward,
+        nhead,
+        dropout,
+        num_layers_encoder,
+        num_layers_decoder,
+        num_nodes,
+        n_perm_samples=None,
+        sinkhorn_iter=None,
+        use_positional_encoding=False,
+        skeleton_loss_weight: float = 1.0,
+        order_loss_weight: float = 1.0,
+        skeleton_decoder_layers: int = 2,
+        source_threshold: float = 0.5,
+        source_pos_weight: float = 1.0,
+        skeleton_threshold: float = 0.5,
+        source_use_global_context: bool = True,
+        device=None,
+        dtype=None,
+        mlp_use_bias: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            nhead=nhead,
+            num_layers=num_layers_encoder,
+            emb_depth=emb_depth,
+            num_nodes=num_nodes,
+            use_positional_encoding=use_positional_encoding,
+            dropout=dropout,
+            device=device,
+            dtype=dtype,
+            mlp_use_bias=mlp_use_bias,
+        )
+        self.num_nodes = num_nodes
+        self.source_threshold = source_threshold
+        self.source_pos_weight = source_pos_weight
+        self.skeleton_threshold = skeleton_threshold
+        self._init_skeleton_head(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            num_layers_skeleton=skeleton_decoder_layers,
+            dropout=dropout,
+            skeleton_loss_weight=skeleton_loss_weight,
+            order_loss_weight=order_loss_weight,
+            device=device,
+            dtype=dtype,
+        )
+        self.source_layer_decoder = SourceLayerDecoder(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            num_layers=num_layers_decoder,
+            dropout=dropout,
+            use_global_context=source_use_global_context,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _encode_raw_data(self, target_data: Tensor, mask: Optional[Tensor]) -> Tensor:
+        if target_data.dim() == 3:
+            target_data = target_data.unsqueeze(-1)
+        return self.encode(target_data=target_data, mask=mask).squeeze(2)
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+        batch_size, num_nodes = raw_node_repr.shape[:2]
+        valid_nodes = self._valid_nodes_from_decoder_mask(
+            mask,
+            batch_size=batch_size,
+            num_nodes=num_nodes,
+            device=raw_node_repr.device,
+        )
+        skeleton_logits = self._skeleton_logits_from_node_repr(raw_node_repr, mask=mask)
+
+        if graph is None:
+            layer_ids, layer_counts, _ = self._decode_source_layers_from_node_repr(
+                raw_node_repr,
+                valid_nodes=valid_nodes,
+            )
+            orders = self._orders_from_layer_ids(layer_ids, valid_nodes)
+            adjacency = self._orient_skeleton_by_layer_ids(
+                skeleton_logits,
+                layer_ids=layer_ids,
+                valid_nodes=valid_nodes,
+                threshold=self.skeleton_threshold,
+            )
+            return {
+                "orders": orders,
+                "layer_ids": layer_ids,
+                "layer_counts": layer_counts,
+                "skeleton_logits": skeleton_logits,
+                "adjacency": adjacency,
+            }
+
+        if self.order_loss_weight != 0:
+            source_loss, true_layer_ids, source_targets, layer_counts = self._source_layer_loss_per_batch(
+                raw_node_repr,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            source_loss = torch.zeros(
+                target_data.size(0),
+                device=target_data.device,
+                dtype=target_data.dtype,
+            )
+            true_layer_ids = None
+            source_targets = None
+            layer_counts = None
+
+        if self.skeleton_loss_weight != 0:
+            skeleton_loss = self._skeleton_loss_per_batch(
+                skeleton_logits,
+                graph=graph,
+                mask=mask,
+            )
+        else:
+            skeleton_loss = torch.zeros_like(source_loss)
+
+        return {
+            "loss": self.order_loss_weight * source_loss + self.skeleton_loss_weight * skeleton_loss,
+            "order_loss": source_loss,
+            "source_layer_loss": source_loss,
+            "skeleton_loss": skeleton_loss,
+            "true_layer_ids": true_layer_ids,
+            "source_targets": source_targets,
+            "layer_counts": layer_counts,
+            "skeleton_logits": skeleton_logits,
+        }
+
+    def calculate_loss(self, output, target):
+        if not isinstance(output, dict) or "loss" not in output:
+            raise ValueError(
+                "CausalSourceLayerJointSkeletonSingleEncoder expects forward() "
+                "to return a loss dict."
+            )
+        return output["loss"]
+
+    def predict_adjacency(
+        self,
+        target_data: Tensor,
+        mask: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]:
+        output = self.forward(target_data=target_data, graph=None, mask=mask, is_training=False)
+        return output
+
+    def sample(self, target_data: Tensor, num_samples: int = 1, mask: Optional[Tensor] = None):
+        output = self.predict_adjacency(target_data=target_data, mask=mask)
+        orders = output["orders"].unsqueeze(0).expand(num_samples, -1, -1).contiguous()
+        info = {
+            "layer_ids": output["layer_ids"],
+            "layer_counts": output["layer_counts"],
+            "adjacency": output["adjacency"],
+            "skeleton_logits": output["skeleton_logits"],
+        }
+        return orders, info
 
 
 class CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton(

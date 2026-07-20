@@ -21,6 +21,7 @@ from ml2_meta_causal_discovery.models.topo_order_diffusion import (
     CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalSkeletonDecoder,
+    CausalSourceLayerJointSkeletonSingleEncoder,
     CausalTopoOrderDiffusion,
     CausalTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalTopoOrderDiffusionWithSkeleton,
@@ -234,8 +235,9 @@ def npf_main(args):
         "topo_priority_diffusion_skeleton_single_encoder",
         "topo_priority_node_diffusion_skeleton_single_encoder",
     }
+    source_layer_decoders = {"source_layer_joint_skeleton_single_encoder"}
     skeleton_only_decoders = {"topo_skeleton"}
-    topo_like_decoders = order_decoders | skeleton_only_decoders
+    topo_like_decoders = order_decoders | skeleton_only_decoders | source_layer_decoders
     if args.topo_bfloat16:
         print(
             "[WARN] --topo_bfloat16 is deprecated and ignored. "
@@ -280,11 +282,19 @@ def npf_main(args):
         "topo_diffusion_skeleton_single_encoder",
         "topo_priority_diffusion_skeleton_single_encoder",
         "topo_priority_node_diffusion_skeleton_single_encoder",
+        "source_layer_joint_skeleton_single_encoder",
     }:
         TNPD_KWARGS.update(
             skeleton_loss_weight=args.skeleton_loss_weight,
             order_loss_weight=args.order_loss_weight,
             skeleton_decoder_layers=args.skeleton_decoder_layers,
+        )
+    if args.decoder in source_layer_decoders:
+        TNPD_KWARGS.update(
+            source_threshold=args.source_threshold,
+            source_pos_weight=args.source_pos_weight,
+            skeleton_threshold=args.skeleton_threshold,
+            source_use_global_context=args.source_use_global_context,
         )
 
     if args.decoder == "probabilistic":
@@ -317,6 +327,8 @@ def npf_main(args):
         module = CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton
     elif args.decoder == "topo_priority_node_diffusion_skeleton_single_encoder":
         module = CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton
+    elif args.decoder == "source_layer_joint_skeleton_single_encoder":
+        module = CausalSourceLayerJointSkeletonSingleEncoder
     else:
         raise ValueError(
             "Decoder must be probabilistic, probabilistic_ar, autoregressive, "
@@ -324,7 +336,8 @@ def npf_main(args):
             "topo_diffusion_skeleton, topo_priority_diffusion_skeleton, "
             "topo_diffusion_skeleton_single_encoder or "
             "topo_priority_diffusion_skeleton_single_encoder, or "
-            "topo_priority_node_diffusion_skeleton_single_encoder"
+            "topo_priority_node_diffusion_skeleton_single_encoder, or "
+            "source_layer_joint_skeleton_single_encoder"
         )
 
     model_1d = partial(
@@ -415,6 +428,12 @@ def npf_main(args):
             calc_metrics=False,
         )
         metric_dict.update(evaluate_topo_order_model(trainer, num_samples=1))
+    elif args.decoder in source_layer_decoders:
+        metric_dict = trainer.test_single_epoch(
+            test_loader=trainer.test_loader,
+            metric_dict={},
+            calc_metrics=False,
+        )
     elif args.decoder in skeleton_only_decoders:
         metric_dict = trainer.test_single_epoch(
             test_loader=trainer.test_loader,
