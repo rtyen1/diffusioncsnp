@@ -291,6 +291,7 @@ def evaluate_dataset(
     standardize: bool,
     mode: str,
     threshold: float,
+    evaluate_skeleton: bool,
 ) -> Dict[str, float]:
     # Match CausalClassifierTrainer: after collate/subsampling, inputs are
     # standardised again along the sample axis immediately before model(...).
@@ -316,14 +317,15 @@ def evaluate_dataset(
             )
         )
 
-    skeleton_prob = skeleton_prob_from_node_repr(model, node_repr)
-    metrics.update(
-        skeleton_metrics(
-            true_dag=true_dag,
-            skeleton_prob=skeleton_prob,
-            threshold=threshold,
+    if evaluate_skeleton:
+        skeleton_prob = skeleton_prob_from_node_repr(model, node_repr)
+        metrics.update(
+            skeleton_metrics(
+                true_dag=true_dag,
+                skeleton_prob=skeleton_prob,
+                threshold=threshold,
+            )
         )
-    )
     return metrics
 
 
@@ -341,6 +343,12 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
     unknown_modes = set(modes) - valid_modes
     if unknown_modes:
         raise ValueError(f"Unknown eval modes: {sorted(unknown_modes)}")
+
+    plot_groups = parse_csv_list(args.plot_groups)
+    unknown_plot_groups = set(plot_groups) - {"topo", "skeleton"}
+    if unknown_plot_groups:
+        raise ValueError(f"Unknown plot groups: {sorted(unknown_plot_groups)}")
+    evaluate_skeleton = "skeleton" in plot_groups
 
     sample_sizes = parse_int_list(args.sample_sizes)
     results_dir = Path(args.results_dir).expanduser().resolve()
@@ -475,6 +483,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
                                         standardize=args.standardize,
                                         mode=mode,
                                         threshold=args.threshold,
+                                        evaluate_skeleton=evaluate_skeleton,
                                     )
                                     ckpt_aggregate.add_ok(base_group, metrics)
                                     ckpt_by_sem.add_ok(sem_group, metrics)
