@@ -258,6 +258,18 @@ def skeleton_prob_from_node_repr(model: Any, node_repr: torch.Tensor) -> np.ndar
     return probs.detach().cpu().numpy().astype(float)
 
 
+def override_topo_beam_size(model: Any, beam_size: Optional[int]) -> None:
+    if beam_size is None:
+        return
+    if beam_size <= 0:
+        raise ValueError("--topo_beam_size_override must be positive.")
+    diffusion_utils = getattr(model, "diffusion_utils", None)
+    if diffusion_utils is None:
+        raise ValueError("Selected model does not expose diffusion_utils for beam search.")
+    diffusion_utils.PL_beam_size = beam_size
+    diffusion_utils.t_beam_size = beam_size
+
+
 def standardize_full_dataset(data: np.ndarray, standardize: bool) -> np.ndarray:
     data = np.asarray(data, dtype=np.float32)
     if not standardize:
@@ -380,6 +392,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
     print(f"checkpoints:       {checkpoints[0]} ... {checkpoints[-1]} ({len(checkpoints)})")
     print(f"eval_modes:        {modes}")
     print(f"num_order_samples: {args.num_order_samples}")
+    print(f"beam override:     {args.topo_beam_size_override}")
     print(f"device:            {device}")
     print("=" * 100)
 
@@ -415,6 +428,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
             device=device,
             bak_path=Path("ml2_meta_causal_discovery/models/causaltransformernp.py.mask_version.bak"),
         )
+        override_topo_beam_size(model, args.topo_beam_size_override)
         print(f"loaded: {loaded_path}")
         ckpt_index = checkpoint_index(checkpoint)
         ckpt_aggregate = RunningSummary(AGGREGATE_GROUP_COLS)
@@ -663,6 +677,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint_suffix", type=str, default=".pt")
     parser.add_argument("--eval_modes", type=str, default="beam")
     parser.add_argument("--num_order_samples", type=int, default=200)
+    parser.add_argument("--topo_beam_size_override", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--seed", type=int, default=0)
