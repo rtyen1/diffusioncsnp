@@ -66,6 +66,7 @@ def seed_all(seed: int) -> None:
 @torch.no_grad()
 def diagnose_dataset(
     model,
+    model_module: str,
     data: np.ndarray,
     graph: np.ndarray,
     device: str,
@@ -77,7 +78,22 @@ def diagnose_dataset(
     graph_tensor = torch.as_tensor(graph, dtype=inputs.dtype, device=device).unsqueeze(0)
 
     seed_all(seed)
-    node_repr, _ = model._encode_ordered_data(inputs, graph=graph_tensor, mask=None)
+    priority_ordered = None
+    if model_module == "topo_priority_diffusion":
+        node_repr, priority_ordered, _, _ = model._encode_priority_ordered_data(
+            inputs,
+            graph=graph_tensor,
+            mask=None,
+        )
+    else:
+        node_repr, _ = model._encode_ordered_data(inputs, graph=graph_tensor, mask=None)
+
+    if priority_ordered is None:
+        reverse_model = model.reverse_model
+    else:
+        def reverse_model(src, time, x_start):
+            return model.reverse_model(src, time, x_start, priority_ordered)
+
     reverse_steps = list(model.diffusion_utils.reverse_steps)
     if len(reverse_steps) < 2:
         raise ValueError(f"At least two reverse steps are required, got {reverse_steps}.")
@@ -97,7 +113,7 @@ def diagnose_dataset(
             perm_current = perm_seq[0, step_idx, 0]
             timestep = torch.tensor([current_step], device=device)
 
-            scores = model.reverse_model(
+            scores = reverse_model(
                 perm_current.view(1, 1, -1),
                 timestep,
                 node_repr,
@@ -108,7 +124,7 @@ def diagnose_dataset(
                 perm_t=perm_current.unsqueeze(0),
             )
             predicted_previous, _, _ = model.diffusion_utils.p_sample(
-                model.reverse_model,
+                reverse_model,
                 perm_current.unsqueeze(0),
                 timestep,
                 node_repr,
@@ -229,16 +245,22 @@ def evaluate(args: argparse.Namespace) -> None:
         device=device,
         bak_path=Path("ml2_meta_causal_discovery/models/causaltransformernp.py.mask_version.bak"),
     )
-    if config.get("module") != "topo_diffusion":
+    model_module = config.get("module")
+    supported_modules = {"topo_diffusion", "topo_priority_diffusion"}
+    if model_module not in supported_modules:
         raise ValueError(
-            "This diagnostic currently supports the order-only topo_diffusion model; "
-            f"got module={config.get('module')!r}."
+            "This diagnostic supports order-only topo_diffusion and "
+            "topo_priority_diffusion models; "
+            f"got module={model_module!r}."
         )
     model.eval()
 
     print("=" * 100)
     print("Topology diffusion reverse-step diagnostic")
     print(f"loaded:          {loaded_path}")
+    print(f"module:          {model_module}")
+    if model_module == "topo_priority_diffusion":
+        print(f"priority_mode:   {getattr(model, 'topo_priority_mode', 'random')}")
     print(f"benchmark_root:  {benchmark_root}")
     print(f"split:           {args.split}")
     print(f"node_counts:     {node_counts}")
@@ -281,6 +303,7 @@ def evaluate(args: argparse.Namespace) -> None:
                             selected = select_observations(normalized_data, sample_size, eval_seed)
                             step_rows = diagnose_dataset(
                                 model=model,
+                                model_module=model_module,
                                 data=selected,
                                 graph=graph,
                                 device=device,
