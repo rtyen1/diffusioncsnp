@@ -278,6 +278,12 @@ class CausalClassifierTrainer:
                         "skeleton_loss",
                         adj_logit.get("skeleton_loss"),
                     )
+                    self._accumulate_tensor_metric(
+                        metric_sums,
+                        metric_counts,
+                        "precedence_loss",
+                        adj_logit.get("precedence_loss"),
+                    )
                 if hasattr(self.model, "evaluate_batch"):
                     batch_metrics = self.model.evaluate_batch(
                         inputs,
@@ -369,6 +375,12 @@ class CausalClassifierTrainer:
                     metric_counts,
                     "skeleton_loss",
                     adj_logit.get("skeleton_loss"),
+                )
+                self._accumulate_tensor_metric(
+                    metric_sums,
+                    metric_counts,
+                    "precedence_loss",
+                    adj_logit.get("precedence_loss"),
                 )
             if hasattr(self.model, "evaluate_batch"):
                 with th.no_grad():
@@ -464,6 +476,8 @@ class CausalClassifierTrainer:
                         metric_dict["train source-layer loss"] = logits["source_layer_loss"].mean().item()
                     if "skeleton_loss" in logits:
                         metric_dict["train skeleton loss"] = logits["skeleton_loss"].mean().item()
+                    if "precedence_loss" in logits:
+                        metric_dict["train precedence loss"] = logits["precedence_loss"].mean().item()
                 if i % 10000 == 0 and i > 0:
                     # don't do validation with autoregressive as its too expensive
                     if self.model.__class__.__name__ != "CausalAutoregressiveDecoder":

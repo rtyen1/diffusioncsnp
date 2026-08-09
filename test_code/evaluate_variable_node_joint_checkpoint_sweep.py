@@ -270,6 +270,18 @@ def override_topo_beam_size(model: Any, beam_size: Optional[int]) -> None:
     diffusion_utils.t_beam_size = beam_size
 
 
+def override_precedence_rerank_beta(model: Any, beta: Optional[float]) -> None:
+    if beta is None:
+        return
+    if beta < 0:
+        raise ValueError("--topo_precedence_rerank_beta_override must be non-negative.")
+    if getattr(model, "precedence_head", None) is None:
+        raise ValueError(
+            "The selected checkpoint has no trained precedence relation head."
+        )
+    model.topo_precedence_rerank_beta = float(beta)
+
+
 def standardize_full_dataset(data: np.ndarray, standardize: bool) -> np.ndarray:
     data = np.asarray(data, dtype=np.float32)
     if not standardize:
@@ -393,6 +405,7 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
     print(f"eval_modes:        {modes}")
     print(f"num_order_samples: {args.num_order_samples}")
     print(f"beam override:     {args.topo_beam_size_override}")
+    print(f"precedence beta:   {args.topo_precedence_rerank_beta_override}")
     print(f"device:            {device}")
     print("=" * 100)
 
@@ -429,6 +442,10 @@ def evaluate(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
             bak_path=Path("ml2_meta_causal_discovery/models/causaltransformernp.py.mask_version.bak"),
         )
         override_topo_beam_size(model, args.topo_beam_size_override)
+        override_precedence_rerank_beta(
+            model,
+            args.topo_precedence_rerank_beta_override,
+        )
         print(f"loaded: {loaded_path}")
         ckpt_index = checkpoint_index(checkpoint)
         ckpt_aggregate = RunningSummary(AGGREGATE_GROUP_COLS)
@@ -678,6 +695,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_modes", type=str, default="beam")
     parser.add_argument("--num_order_samples", type=int, default=200)
     parser.add_argument("--topo_beam_size_override", type=int, default=None)
+    parser.add_argument("--topo_precedence_rerank_beta_override", type=float, default=None)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--seed", type=int, default=0)

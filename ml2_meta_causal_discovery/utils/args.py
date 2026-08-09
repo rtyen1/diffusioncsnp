@@ -313,6 +313,31 @@ def retun_default_args(parser):
         help="Loss weight for the diffusion topological-order objective in *_skeleton topo decoders.",
     )
     parser.add_argument(
+        "--topo_precedence_loss_weight",
+        default=0.0,
+        type=float,
+        help=(
+            "Weight of the three-class ancestor/descendant/incomparable loss. "
+            "Supported by the single-encoder topo+skeleton decoders; zero "
+            "preserves the original model and training objective."
+        ),
+    )
+    parser.add_argument(
+        "--topo_precedence_hidden_dim",
+        default=64,
+        type=int,
+        help="Hidden width of the pairwise precedence relation head.",
+    )
+    parser.add_argument(
+        "--topo_precedence_rerank_beta",
+        default=0.0,
+        type=float,
+        help=(
+            "Weight of precedence compatibility when reranking final diffusion "
+            "beam candidates. Zero preserves the original beam result."
+        ),
+    )
+    parser.add_argument(
         "--skeleton_decoder_layers",
         default=2,
         type=int,
@@ -411,6 +436,15 @@ def retun_default_args(parser):
         default=None,
         type=str,
         help="Optional direct checkpoint path. Overrides init_from_run_name/checkpoint if set.",
+    )
+    parser.add_argument(
+        "--init_allow_partial",
+        default=False,
+        action="store_true",
+        help=(
+            "Allow --init_from_* to load only matching parameters, for example "
+            "when adding new skeleton/precedence heads. Resume remains strict."
+        ),
     )
     parser.add_argument(
         "--resume_from_run_name",

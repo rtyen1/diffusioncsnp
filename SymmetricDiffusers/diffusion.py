@@ -317,7 +317,7 @@ class DiffusionUtils(nn.Module):
         return result_x, perm
 
     @torch.no_grad()
-    def p_sample_beam_search(self, input, reverse_model):
+    def p_sample_beam_search(self, input, reverse_model, return_candidates=False):
         """Sampling by beam search
 
         Args:
@@ -395,6 +395,9 @@ class DiffusionUtils(nn.Module):
             )  # [batch, t_beam]
             topk_idx_expanded = topk_idx.unsqueeze(-1).expand(-1, -1, n)
             result_perm = torch.gather(candidates_perm, -2, topk_idx_expanded)
+
+        if return_candidates:
+            return result_perm, result_log_probs
 
         if self.perm_fix_first:  # TSP
             tsp_eval = utils.TSPEvaluator(

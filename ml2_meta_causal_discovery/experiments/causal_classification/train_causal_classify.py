@@ -101,13 +101,21 @@ def torch_load(path: Path, device: str, weights_only: bool = False):
         return torch.load(path, map_location=device)
 
 
-def load_initial_weights(model, checkpoint_path: Path, device: str):
+def load_initial_weights(
+    model,
+    checkpoint_path: Path,
+    device: str,
+    allow_partial: bool = False,
+):
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Initial checkpoint not found: {checkpoint_path}")
     state_dict = torch_load(checkpoint_path, device=device, weights_only=True)
     if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
         state_dict = state_dict["model_state_dict"]
-    model.load_state_dict(state_dict)
+    incompatible = model.load_state_dict(state_dict, strict=not allow_partial)
+    if allow_partial:
+        print(f"Partially initialized model; missing keys: {incompatible.missing_keys}")
+        print(f"Partially initialized model; unexpected keys: {incompatible.unexpected_keys}")
     print(f"Initialized model weights from: {checkpoint_path}")
 
 
@@ -238,6 +246,19 @@ def npf_main(args):
     source_layer_decoders = {"source_layer_joint_skeleton_single_encoder"}
     skeleton_only_decoders = {"topo_skeleton"}
     topo_like_decoders = order_decoders | skeleton_only_decoders | source_layer_decoders
+    precedence_decoders = {
+        "topo_diffusion_skeleton_single_encoder",
+        "topo_priority_diffusion_skeleton_single_encoder",
+    }
+    if (
+        args.topo_precedence_loss_weight != 0
+        or args.topo_precedence_rerank_beta != 0
+    ) and args.decoder not in precedence_decoders:
+        raise ValueError(
+            "Precedence supervision/reranking is supported only by "
+            "topo_diffusion_skeleton_single_encoder and "
+            "topo_priority_diffusion_skeleton_single_encoder."
+        )
     if args.topo_bfloat16:
         print(
             "[WARN] --topo_bfloat16 is deprecated and ignored. "
@@ -274,6 +295,9 @@ def npf_main(args):
         topo_beam_size=args.topo_beam_size,
         topo_priority_scale_init=args.topo_priority_scale_init,
         topo_priority_mode=args.topo_priority_mode,
+        topo_precedence_loss_weight=args.topo_precedence_loss_weight,
+        topo_precedence_hidden_dim=args.topo_precedence_hidden_dim,
+        topo_precedence_rerank_beta=args.topo_precedence_rerank_beta,
     )
     if args.decoder in {
         "topo_skeleton",
@@ -397,6 +421,7 @@ def npf_main(args):
             model=model,
             checkpoint_path=init_checkpoint,
             device=TNPD_KWARGS["device"],
+            allow_partial=args.init_allow_partial,
         )
     trainer = CausalClassifierTrainer(
         train_dataset=dataset,

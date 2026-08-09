@@ -15,6 +15,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from ml2_meta_causal_discovery.models.causaltransformercomponents import (
@@ -157,6 +158,308 @@ class BakStyleSkeletonMixin:
         pair_weight = pair_mask.to(dtype=loss.dtype)
         denom = pair_weight.flatten(1).sum(dim=1).clamp_min(1)
         return (loss * pair_weight).flatten(1).sum(dim=1) / denom
+
+
+class PrecedenceRelationHead(nn.Module):
+    """Swap-consistent three-way relation head for unordered node pairs.
+
+    For each ordered pair (i, j), class 0 means i is an ancestor of j,
+    class 1 means j is an ancestor of i, and class 2 means incomparable.
+    Swapping i and j swaps the first two logits and leaves the third unchanged.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        hidden_dim: int,
+        device=None,
+        dtype=None,
+    ) -> None:
+        super().__init__()
+        factory_kwargs = {}
+        if device is not None:
+            factory_kwargs["device"] = device
+        if dtype is not None:
+            factory_kwargs["dtype"] = dtype
+
+        self.direction = nn.Sequential(
+            nn.Linear(2 * d_model, hidden_dim, **factory_kwargs),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1, **factory_kwargs),
+        )
+        self.incomparable = nn.Sequential(
+            nn.Linear(2 * d_model, hidden_dim, **factory_kwargs),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1, **factory_kwargs),
+        )
+
+    def forward(self, node_repr: Tensor) -> Tensor:
+        node_i = node_repr.unsqueeze(2).expand(-1, -1, node_repr.size(1), -1)
+        node_j = node_repr.unsqueeze(1).expand(-1, node_repr.size(1), -1, -1)
+        forward_logit = self.direction(torch.cat([node_i, node_j], dim=-1)).squeeze(-1)
+        backward_logit = forward_logit.transpose(1, 2)
+        symmetric_features = torch.cat(
+            [(node_i - node_j).abs(), node_i * node_j],
+            dim=-1,
+        )
+        incomparable_logit = self.incomparable(symmetric_features).squeeze(-1)
+        return torch.stack(
+            [forward_logit, backward_logit, incomparable_logit],
+            dim=-1,
+        )
+
+
+class PrecedenceRelationMixin:
+    """DAG partial-order supervision and optional final-beam reranking."""
+
+    def _init_precedence_relation(
+        self,
+        d_model: int,
+        hidden_dim: int,
+        loss_weight: float,
+        rerank_beta: float,
+        device=None,
+        dtype=None,
+    ) -> None:
+        if loss_weight < 0:
+            raise ValueError("topo_precedence_loss_weight must be non-negative.")
+        if rerank_beta < 0:
+            raise ValueError("topo_precedence_rerank_beta must be non-negative.")
+        if hidden_dim <= 0:
+            raise ValueError("topo_precedence_hidden_dim must be positive.")
+
+        self.topo_precedence_loss_weight = float(loss_weight)
+        self.topo_precedence_rerank_beta = float(rerank_beta)
+        self.topo_precedence_hidden_dim = int(hidden_dim)
+        self.precedence_head = None
+        if loss_weight > 0 or rerank_beta > 0:
+            self.precedence_head = PrecedenceRelationHead(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+
+    @staticmethod
+    def _valid_node_mask(mask: Optional[Tensor], graph: Tensor) -> Tensor:
+        if mask is None:
+            return torch.ones(
+                graph.shape[:2],
+                dtype=torch.bool,
+                device=graph.device,
+            )
+        return mask[:, -1, :] > -1e20
+
+    @staticmethod
+    def _transitive_closure(graph: Tensor, valid_nodes: Tensor) -> Tensor:
+        """Boolean reachability for graph[parent, child], excluding padding."""
+        reach = graph > 0.5
+        valid_pairs = valid_nodes.unsqueeze(2) & valid_nodes.unsqueeze(1)
+        reach = reach & valid_pairs
+        for k in range(graph.size(-1)):
+            reach = reach | (
+                reach[:, :, k].unsqueeze(2) & reach[:, k, :].unsqueeze(1)
+            )
+        diagonal = torch.eye(
+            graph.size(-1),
+            dtype=torch.bool,
+            device=graph.device,
+        ).unsqueeze(0)
+        return reach & ~diagonal & valid_pairs
+
+    def _precedence_loss_per_batch(
+        self,
+        logits: Tensor,
+        graph: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tensor:
+        valid_nodes = self._valid_node_mask(mask, graph)
+        reach = self._transitive_closure(graph, valid_nodes)
+        num_nodes = graph.size(-1)
+        pair_mask = torch.triu(
+            torch.ones(
+                (num_nodes, num_nodes),
+                dtype=torch.bool,
+                device=graph.device,
+            ),
+            diagonal=1,
+        ).unsqueeze(0)
+        pair_mask = pair_mask & valid_nodes.unsqueeze(2) & valid_nodes.unsqueeze(1)
+
+        labels = torch.full(
+            graph.shape,
+            2,
+            dtype=torch.long,
+            device=graph.device,
+        )
+        labels = torch.where(reach, torch.zeros_like(labels), labels)
+        labels = torch.where(reach.transpose(1, 2), torch.ones_like(labels), labels)
+        losses = F.cross_entropy(
+            logits.float().permute(0, 3, 1, 2),
+            labels,
+            reduction="none",
+        )
+        pair_weight = pair_mask.to(dtype=losses.dtype)
+        denom = pair_weight.flatten(1).sum(dim=1).clamp_min(1)
+        return (losses * pair_weight).flatten(1).sum(dim=1) / denom
+
+    def _precedence_outputs(
+        self,
+        raw_node_repr: Tensor,
+        graph: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tuple[Optional[Tensor], Tensor]:
+        if self.precedence_head is None or self.topo_precedence_loss_weight == 0:
+            zero = torch.zeros(
+                raw_node_repr.size(0),
+                dtype=raw_node_repr.dtype,
+                device=raw_node_repr.device,
+            )
+            return None, zero
+        logits = self.precedence_head(raw_node_repr)
+        loss = self._precedence_loss_per_batch(logits, graph=graph, mask=mask)
+        return logits, loss
+
+    def _precedence_candidate_scores(
+        self,
+        relation_logits: Tensor,
+        candidates: Tensor,
+        valid_nodes: Optional[Tensor] = None,
+    ) -> Tensor:
+        """Average log compatibility of complete candidate permutations."""
+        batch_size, _, num_nodes = candidates.shape
+        pair_indices = torch.triu_indices(
+            num_nodes,
+            num_nodes,
+            offset=1,
+            device=candidates.device,
+        )
+        left_nodes = candidates[:, :, pair_indices[0]]
+        right_nodes = candidates[:, :, pair_indices[1]]
+        batch_idx = torch.arange(batch_size, device=candidates.device)[:, None, None]
+        pair_logits = relation_logits[batch_idx, left_nodes, right_nodes]
+        pair_probs = F.softmax(pair_logits.float(), dim=-1)
+        compatibility = (pair_probs[..., 0] + pair_probs[..., 2]).clamp_min(1e-8)
+
+        if valid_nodes is None:
+            pair_weight = torch.ones_like(compatibility)
+        else:
+            pair_weight = (
+                valid_nodes[batch_idx, left_nodes]
+                & valid_nodes[batch_idx, right_nodes]
+            ).to(dtype=compatibility.dtype)
+        denom = pair_weight.sum(dim=-1).clamp_min(1)
+        return (compatibility.log() * pair_weight).sum(dim=-1) / denom
+
+    @torch.no_grad()
+    def sample_precedence_reranked_beam_from_node_repr(
+        self,
+        raw_node_repr: Tensor,
+        num_samples: int = 1,
+        mask: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+        if self.precedence_head is None:
+            raise RuntimeError(
+                "Precedence beam reranking requires a trained precedence head."
+            )
+
+        priority = None
+        node_repr = raw_node_repr
+        relation_logits = self.precedence_head(raw_node_repr)
+        valid_nodes = None
+        if mask is not None:
+            valid_nodes = mask[:, -1, :] > -1e20
+
+        if hasattr(self, "_p_sample_beam_search_with_priority"):
+            batch_size, num_nodes, d_model = raw_node_repr.shape
+            priority = self._sample_priorities(
+                batch_size=num_samples * batch_size,
+                num_nodes=num_nodes,
+                device=raw_node_repr.device,
+                dtype=raw_node_repr.dtype,
+            )
+            node_repr = (
+                raw_node_repr.unsqueeze(0)
+                .expand(num_samples, batch_size, num_nodes, d_model)
+                .reshape(num_samples * batch_size, num_nodes, d_model)
+            )
+            relation_logits = (
+                relation_logits.unsqueeze(0)
+                .expand(num_samples, *relation_logits.shape)
+                .reshape(num_samples * batch_size, num_nodes, num_nodes, 3)
+            )
+            if valid_nodes is not None:
+                valid_nodes = (
+                    valid_nodes.unsqueeze(0)
+                    .expand(num_samples, *valid_nodes.shape)
+                    .reshape(num_samples * batch_size, num_nodes)
+                )
+            candidates, diffusion_log_probs = self._p_sample_beam_search_with_priority(
+                node_repr,
+                priority_start=priority,
+                return_candidates=True,
+            )
+        else:
+            candidates, diffusion_log_probs = self.diffusion_utils.p_sample_beam_search(
+                node_repr,
+                self.reverse_model,
+                return_candidates=True,
+            )
+
+        precedence_scores = self._precedence_candidate_scores(
+            relation_logits,
+            candidates,
+            valid_nodes=valid_nodes,
+        )
+        num_decisions = max(
+            (len(self.diffusion_utils.reverse_steps) - 1) * (candidates.size(-1) - 1),
+            1,
+        )
+        diffusion_scores = diffusion_log_probs.float() / num_decisions
+        combined_scores = (
+            diffusion_scores
+            + self.topo_precedence_rerank_beta * precedence_scores
+        )
+        best_idx = combined_scores.argmax(dim=-1)
+        batch_idx = torch.arange(candidates.size(0), device=candidates.device)
+        best_orders = candidates[batch_idx, best_idx]
+        return best_orders, priority
+
+    def sample(
+        self,
+        target_data: Tensor,
+        num_samples: int = 1,
+        mask: Optional[Tensor] = None,
+    ):
+        if (
+            self.precedence_head is None
+            or self.topo_precedence_rerank_beta == 0
+        ):
+            return super().sample(
+                target_data,
+                num_samples=num_samples,
+                mask=mask,
+            )
+
+        raw_node_repr = self._encode_raw_data(target_data, mask=mask)
+        was_training = self.reverse_model.training
+        self.reverse_model.eval()
+        try:
+            orders, priority = self.sample_precedence_reranked_beam_from_node_repr(
+                raw_node_repr,
+                num_samples=num_samples,
+                mask=mask,
+            )
+        finally:
+            self.reverse_model.train(was_training)
+
+        batch_size, num_nodes = raw_node_repr.shape[:2]
+        if priority is None:
+            orders = orders.unsqueeze(0).expand(num_samples, -1, -1)
+            return orders, mask
+        orders = orders.reshape(num_samples, batch_size, num_nodes)
+        priority = priority.reshape(num_samples, batch_size, num_nodes)
+        return orders, priority
 
 
 class SourceLayerDecoder(nn.Module):
@@ -1362,6 +1665,7 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
         self,
         x_start: Tensor,
         priority_start: Tensor,
+        return_candidates: bool = False,
     ) -> Tuple[Tensor, Tensor]:
         """Beam-search reverse diffusion conditioned on fixed priority features.
 
@@ -1429,6 +1733,9 @@ class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):
             )
             topk_idx_expanded = topk_idx.unsqueeze(-1).expand(-1, -1, num_nodes)
             result_perm = torch.gather(candidates_perm, -2, topk_idx_expanded)
+
+        if return_candidates:
+            return result_perm, result_log_probs
 
         best_perm = result_perm[:, 0, :]
         result_x = _sd_utils.permute_embd(best_perm, x_start)
@@ -1646,9 +1953,28 @@ class CausalPriorityTopoOrderDiffusionWithSkeleton(
 
 
 class CausalTopoOrderDiffusionSingleEncoderWithSkeleton(
+    PrecedenceRelationMixin,
     CausalTopoOrderDiffusionWithSkeleton,
 ):
     """Joint topo+skeleton model that encodes the raw dataset only once."""
+
+    def __init__(
+        self,
+        *args,
+        topo_precedence_loss_weight: float = 0.0,
+        topo_precedence_hidden_dim: int = 64,
+        topo_precedence_rerank_beta: float = 0.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_precedence_relation(
+            d_model=kwargs["d_model"],
+            hidden_dim=topo_precedence_hidden_dim,
+            loss_weight=topo_precedence_loss_weight,
+            rerank_beta=topo_precedence_rerank_beta,
+            device=kwargs.get("device", None),
+            dtype=kwargs.get("dtype", None),
+        )
 
     def forward(
         self,
@@ -1660,14 +1986,26 @@ class CausalTopoOrderDiffusionSingleEncoderWithSkeleton(
         raw_node_repr = self._encode_raw_data(target_data, mask=mask)
 
         if graph is None:
+            precedence_logits = (
+                self.precedence_head(raw_node_repr)
+                if self.precedence_head is not None
+                else None
+            )
             was_training = self.reverse_model.training
             self.reverse_model.eval()
             try:
-                _, orders = self.diffusion_utils.p_sample_loop(
-                    raw_node_repr,
-                    self.reverse_model,
-                    deterministic=True,
-                )
+                if self.precedence_head is not None and self.topo_precedence_rerank_beta > 0:
+                    orders, _ = self.sample_precedence_reranked_beam_from_node_repr(
+                        raw_node_repr,
+                        num_samples=1,
+                        mask=mask,
+                    )
+                else:
+                    _, orders = self.diffusion_utils.p_sample_loop(
+                        raw_node_repr,
+                        self.reverse_model,
+                        deterministic=True,
+                    )
             finally:
                 self.reverse_model.train(was_training)
             return {
@@ -1676,6 +2014,7 @@ class CausalTopoOrderDiffusionSingleEncoderWithSkeleton(
                     raw_node_repr,
                     mask=mask,
                 ),
+                "precedence_logits": precedence_logits,
             }
 
         clean_orders = None
@@ -1704,19 +2043,50 @@ class CausalTopoOrderDiffusionSingleEncoderWithSkeleton(
             skeleton_logits = None
             skeleton_loss = torch.zeros_like(order_loss)
 
+        precedence_logits, precedence_loss = self._precedence_outputs(
+            raw_node_repr,
+            graph=graph,
+            mask=mask,
+        )
+
         return {
-            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "loss": (
+                self.order_loss_weight * order_loss
+                + self.skeleton_loss_weight * skeleton_loss
+                + self.topo_precedence_loss_weight * precedence_loss
+            ),
             "order_loss": order_loss,
             "skeleton_loss": skeleton_loss,
+            "precedence_loss": precedence_loss,
             "clean_orders": clean_orders,
             "skeleton_logits": skeleton_logits,
+            "precedence_logits": precedence_logits,
         }
 
 
 class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
+    PrecedenceRelationMixin,
     CausalPriorityTopoOrderDiffusionWithSkeleton,
 ):
     """Priority-conditioned joint model that encodes the raw dataset only once."""
+
+    def __init__(
+        self,
+        *args,
+        topo_precedence_loss_weight: float = 0.0,
+        topo_precedence_hidden_dim: int = 64,
+        topo_precedence_rerank_beta: float = 0.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_precedence_relation(
+            d_model=kwargs["d_model"],
+            hidden_dim=topo_precedence_hidden_dim,
+            loss_weight=topo_precedence_loss_weight,
+            rerank_beta=topo_precedence_rerank_beta,
+            device=kwargs.get("device", None),
+            dtype=kwargs.get("dtype", None),
+        )
 
     def forward(
         self,
@@ -1728,6 +2098,11 @@ class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
         raw_node_repr = self._encode_raw_data(target_data, mask=mask)
 
         if graph is None:
+            precedence_logits = (
+                self.precedence_head(raw_node_repr)
+                if self.precedence_head is not None
+                else None
+            )
             priority = self._sample_priorities(
                 batch_size=raw_node_repr.size(0),
                 num_nodes=raw_node_repr.size(1),
@@ -1737,11 +2112,18 @@ class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
             was_training = self.reverse_model.training
             self.reverse_model.eval()
             try:
-                _, orders = self._p_sample_loop_with_priority(
-                    raw_node_repr,
-                    priority_start=priority,
-                    deterministic=True,
-                )
+                if self.precedence_head is not None and self.topo_precedence_rerank_beta > 0:
+                    orders, priority = self.sample_precedence_reranked_beam_from_node_repr(
+                        raw_node_repr,
+                        num_samples=1,
+                        mask=mask,
+                    )
+                else:
+                    _, orders = self._p_sample_loop_with_priority(
+                        raw_node_repr,
+                        priority_start=priority,
+                        deterministic=True,
+                    )
             finally:
                 self.reverse_model.train(was_training)
             return {
@@ -1751,6 +2133,7 @@ class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
                     raw_node_repr,
                     mask=mask,
                 ),
+                "precedence_logits": precedence_logits,
             }
 
         clean_orders = None
@@ -1795,13 +2178,25 @@ class CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton(
             skeleton_logits = None
             skeleton_loss = torch.zeros_like(order_loss)
 
+        precedence_logits, precedence_loss = self._precedence_outputs(
+            raw_node_repr,
+            graph=graph,
+            mask=mask,
+        )
+
         return {
-            "loss": self.order_loss_weight * order_loss + self.skeleton_loss_weight * skeleton_loss,
+            "loss": (
+                self.order_loss_weight * order_loss
+                + self.skeleton_loss_weight * skeleton_loss
+                + self.topo_precedence_loss_weight * precedence_loss
+            ),
             "order_loss": order_loss,
             "skeleton_loss": skeleton_loss,
+            "precedence_loss": precedence_loss,
             "clean_orders": clean_orders,
             "priority": priority,
             "skeleton_logits": skeleton_logits,
+            "precedence_logits": precedence_logits,
         }
 
 

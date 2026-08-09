@@ -210,6 +210,9 @@ def load_model(
             topo_beam_size=config.get("topo_beam_size", 20),
             topo_priority_scale_init=config.get("topo_priority_scale_init", -2.0),
             topo_priority_mode=config.get("topo_priority_mode", "random"),
+            topo_precedence_loss_weight=config.get("topo_precedence_loss_weight", 0.0),
+            topo_precedence_hidden_dim=config.get("topo_precedence_hidden_dim", 64),
+            topo_precedence_rerank_beta=config.get("topo_precedence_rerank_beta", 0.0),
             device=device,
             dtype=th.float32,
         )
@@ -276,8 +279,16 @@ def load_model(
 
 
 def encode_input(data: np.ndarray, device: str, standardize: bool) -> th.Tensor:
-    x = maybe_standardize(data, standardize=standardize).astype(np.float32)
-    return th.tensor(x, dtype=th.float32, device=device).unsqueeze(0)
+    x = th.tensor(
+        np.asarray(data, dtype=np.float32),
+        dtype=th.float32,
+        device=device,
+    ).unsqueeze(0)
+    if standardize:
+        # Match CausalClassifierTrainer exactly: standardise the selected
+        # observations with torch.std's default sample-standard-deviation.
+        x = (x - x.mean(dim=1, keepdim=True)) / x.std(dim=1, keepdim=True)
+    return x
 
 
 def sample_ar_orders(
@@ -393,7 +404,19 @@ def sample_topo_diffusion_orders_from_repr(
         model.reverse_model.eval()
         try:
             if beam:
-                if hasattr(model, "_p_sample_beam_search_with_priority"):
+                if (
+                    hasattr(model, "sample_precedence_reranked_beam_from_node_repr")
+                    and getattr(model, "precedence_head", None) is not None
+                    and getattr(model, "topo_precedence_rerank_beta", 0.0) > 0
+                ):
+                    orders, priority = model.sample_precedence_reranked_beam_from_node_repr(
+                        node_repr,
+                        num_samples=num_order_samples,
+                        mask=None,
+                    )
+                    if priority is not None:
+                        priority_np = priority.detach().cpu().numpy().astype(np.float32)
+                elif hasattr(model, "_p_sample_beam_search_with_priority"):
                     batch_size, num_nodes, d_model = node_repr.shape
                     priority = model._sample_priorities(
                         batch_size=num_order_samples * batch_size,
