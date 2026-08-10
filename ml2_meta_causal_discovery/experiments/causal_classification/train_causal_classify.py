@@ -18,6 +18,7 @@ from ml2_meta_causal_discovery.models.causaltransformernp import (
     CsivaDecoder,
 )
 from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+    CausalOrderGumbelSinkhorn,
     CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
     CausalSkeletonDecoder,
@@ -235,6 +236,7 @@ def npf_main(args):
     )
 
     order_decoders = {
+        "topo_gs_order",
         "topo_diffusion",
         "topo_priority_diffusion",
         "topo_diffusion_skeleton",
@@ -284,6 +286,9 @@ def npf_main(args):
         num_nodes=args.num_nodes,
         n_perm_samples=args.n_perm_samples,
         sinkhorn_iter=args.sinkhorn_iter,
+        gs_temperature=args.gs_temperature,
+        gs_noise_factor=args.gs_noise_factor,
+        gs_train_samples=args.gs_train_samples,
         use_positional_encoding=args.use_positional_encoding,
         num_topo_order_samples=args.num_topo_order_samples,
         ar_hidden_dim=args.ar_hidden_dim,
@@ -337,6 +342,8 @@ def npf_main(args):
         module = AviciDecoder
     elif args.decoder == "topo_skeleton":
         module = CausalSkeletonDecoder
+    elif args.decoder == "topo_gs_order":
+        module = CausalOrderGumbelSinkhorn
     elif args.decoder == "topo_diffusion":
         module = CausalTopoOrderDiffusion
     elif args.decoder == "topo_priority_diffusion":
@@ -356,7 +363,8 @@ def npf_main(args):
     else:
         raise ValueError(
             "Decoder must be probabilistic, probabilistic_ar, autoregressive, "
-            "transformer, topo_skeleton, topo_diffusion, topo_priority_diffusion, "
+            "transformer, topo_skeleton, topo_gs_order, topo_diffusion, "
+            "topo_priority_diffusion, "
             "topo_diffusion_skeleton, topo_priority_diffusion_skeleton, "
             "topo_diffusion_skeleton_single_encoder or "
             "topo_priority_diffusion_skeleton_single_encoder, or "

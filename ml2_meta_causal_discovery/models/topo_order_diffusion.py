@@ -23,6 +23,7 @@ from ml2_meta_causal_discovery.models.causaltransformercomponents import (
     CausalTNPEncoder,
     CausalTransformerDecoderLayer,
 )
+from ml2_meta_causal_discovery.utils.permutations import sample_permutation
 from ml2_meta_causal_discovery.utils.topological_orders import (
     priority_kahn_topological_sort,
     random_kahn_topological_sort,
@@ -1410,6 +1411,255 @@ class CausalTopoOrderDiffusion(CausalTNPEncoder):
         denom = edge_count.clamp_min(1)
         accuracy = (correct & edge_mask).flatten(1).sum(dim=1).float() / denom.float()
         return torch.where(edge_count > 0, accuracy, torch.ones_like(accuracy))
+
+
+class CausalOrderGumbelSinkhorn(CausalTNPEncoder):
+    """Order-only Gumbel-Sinkhorn baseline with topological-order supervision.
+
+    Observation sampling, normalization, and the causal encoder match
+    ``CausalTopoOrderDiffusion``. For every label DAG, training samples one
+    valid root-to-leaf topological order with the same randomized Kahn routine.
+    Unlike diffusion, the one-step decoder must encode nodes in their raw order:
+    feeding it label-ordered nodes would expose the identity target directly.
+    The decoder predicts a full node-to-position assignment matrix and is
+    trained through soft Gumbel-Sinkhorn samples; it does not predict graph
+    edges or a skeleton.
+    """
+
+    def __init__(
+        self,
+        d_model,
+        emb_depth,
+        dim_feedforward,
+        nhead,
+        dropout,
+        num_layers_encoder,
+        num_layers_decoder,
+        num_nodes,
+        n_perm_samples,
+        sinkhorn_iter,
+        use_positional_encoding,
+        gs_temperature: float = 1.0,
+        gs_noise_factor: float = 1.0,
+        gs_train_samples: int = 1,
+        device=None,
+        dtype=None,
+        mlp_use_bias: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            nhead=nhead,
+            num_layers=num_layers_encoder,
+            emb_depth=emb_depth,
+            use_positional_encoding=use_positional_encoding,
+            num_nodes=num_nodes,
+            dropout=dropout,
+            device=device,
+            dtype=dtype,
+            mlp_use_bias=mlp_use_bias,
+        )
+        if gs_temperature <= 0:
+            raise ValueError("gs_temperature must be positive.")
+        if n_perm_samples <= 0:
+            raise ValueError("n_perm_samples must be positive.")
+        if sinkhorn_iter <= 0:
+            raise ValueError("sinkhorn_iter must be positive.")
+        if gs_train_samples <= 0:
+            raise ValueError("gs_train_samples must be positive.")
+
+        self.num_nodes = num_nodes
+        self.n_perm_samples = n_perm_samples
+        self.sinkhorn_iter = sinkhorn_iter
+        self.gs_temperature = gs_temperature
+        self.gs_noise_factor = gs_noise_factor
+        self.gs_train_samples = gs_train_samples
+
+        decoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+            bias=True,
+            device=device,
+            dtype=dtype,
+        )
+        self.order_decoder = nn.TransformerEncoder(
+            decoder_layer,
+            num_layers=num_layers_decoder,
+            norm=nn.LayerNorm(d_model, device=device, dtype=dtype),
+        )
+        self.node_projection = nn.Linear(d_model, d_model, device=device, dtype=dtype)
+        self.position_queries = nn.Parameter(
+            torch.empty(num_nodes, d_model, device=device, dtype=dtype)
+        )
+        self.position_projection = nn.Linear(d_model, d_model, device=device, dtype=dtype)
+        nn.init.normal_(self.position_queries, mean=0.0, std=d_model ** -0.5)
+
+    @staticmethod
+    def _decoder_padding_mask(mask: Optional[Tensor]) -> Optional[Tensor]:
+        if mask is None:
+            return None
+        return mask[:, -1, :] <= -1e20
+
+    def _encode_raw_data(self, target_data: Tensor, mask: Optional[Tensor]) -> Tensor:
+        if target_data.dim() == 3:
+            target_data = target_data.unsqueeze(-1)
+        return self.encode(target_data=target_data, mask=mask).squeeze(2)
+
+    def _sample_batch_topological_orders(
+        self,
+        graph: Tensor,
+        mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        batch_size, num_nodes, _ = graph.shape
+        if num_nodes != self.num_nodes:
+            raise ValueError(f"Expected {self.num_nodes} nodes, got {num_nodes}.")
+        if mask is None:
+            valid_nodes = torch.ones(
+                (batch_size, num_nodes),
+                dtype=torch.bool,
+                device=graph.device,
+            )
+        else:
+            valid_nodes = mask[:, -1, :] > -1e20
+        if not valid_nodes.all():
+            raise ValueError("topo_gs_order currently requires a fixed, unpadded node count.")
+
+        orders = torch.empty((batch_size, num_nodes), dtype=torch.long, device=graph.device)
+        for b in range(batch_size):
+            local_order = random_kahn_topological_sort(graph[b])
+            orders[b] = torch.tensor(local_order, dtype=torch.long, device=graph.device)
+        return orders
+
+    def _order_logits_from_node_repr(
+        self,
+        node_repr: Tensor,
+        mask: Optional[Tensor],
+    ) -> Tensor:
+        padding_mask = self._decoder_padding_mask(mask)
+        if padding_mask is not None and padding_mask.any():
+            raise ValueError("topo_gs_order currently requires a fixed, unpadded node count.")
+        decoded = self.order_decoder(
+            node_repr,
+            src_key_padding_mask=padding_mask,
+        )
+        node_features = self.node_projection(decoded)
+        position_features = self.position_projection(
+            self.position_queries[: node_repr.size(1)]
+        )
+        return torch.einsum("bnd,md->bnm", node_features, position_features) / math.sqrt(
+            node_features.size(-1)
+        )
+
+    @staticmethod
+    def _orders_to_node_positions(orders: Tensor) -> Tensor:
+        positions = torch.empty_like(orders)
+        rank = torch.arange(orders.size(1), device=orders.device).expand_as(orders)
+        positions.scatter_(1, orders.long(), rank)
+        return positions
+
+    def _order_loss_per_batch(self, logits: Tensor, clean_orders: Tensor) -> Tensor:
+        soft_permutations, _ = sample_permutation(
+            log_alpha=logits,
+            temp=self.gs_temperature,
+            noise_factor=self.gs_noise_factor,
+            n_samples=self.gs_train_samples,
+            n_iters=self.sinkhorn_iter,
+            squeeze=False,
+            hard=False,
+            device=logits.device,
+        )
+        target_positions = self._orders_to_node_positions(clean_orders)
+        target = F.one_hot(
+            target_positions,
+            num_classes=logits.size(-1),
+        ).to(dtype=soft_permutations.dtype)
+        nll = -(
+            target.unsqueeze(1)
+            * soft_permutations.float().clamp_min(1e-12).log()
+        ).sum(dim=(-1, -2)) / logits.size(-1)
+        return nll.mean(dim=1)
+
+    @staticmethod
+    def _hard_assignments_to_orders(assignments: Tensor) -> Tensor:
+        node_positions = assignments.argmax(dim=-1)
+        return node_positions.argsort(dim=-1)
+
+    def sample_orders_from_node_repr(
+        self,
+        node_repr: Tensor,
+        num_samples: int = 1,
+        mask: Optional[Tensor] = None,
+        deterministic: bool = False,
+    ) -> Tensor:
+        logits = self._order_logits_from_node_repr(node_repr, mask=mask)
+        assignments, _ = sample_permutation(
+            log_alpha=logits,
+            temp=self.gs_temperature,
+            noise_factor=0.0 if deterministic else self.gs_noise_factor,
+            n_samples=num_samples,
+            n_iters=self.sinkhorn_iter,
+            squeeze=False,
+            hard=True,
+            device=logits.device,
+        )
+        orders = self._hard_assignments_to_orders(assignments)
+        return orders.transpose(0, 1).contiguous()
+
+    def forward(
+        self,
+        target_data: Tensor,
+        graph: Optional[Tensor],
+        mask: Optional[Tensor] = None,
+        is_training: bool = True,
+    ):
+        node_repr = self._encode_raw_data(target_data, mask=mask)
+        if graph is None:
+            orders = self.sample_orders_from_node_repr(
+                node_repr,
+                num_samples=1,
+                mask=mask,
+                deterministic=True,
+            )
+            return {"orders": orders[0]}
+
+        clean_orders = self._sample_batch_topological_orders(graph, mask=mask)
+        logits = self._order_logits_from_node_repr(node_repr, mask=mask)
+        order_loss = self._order_loss_per_batch(logits, clean_orders)
+        return {
+            "loss": order_loss,
+            "order_loss": order_loss,
+            "clean_orders": clean_orders,
+            "order_logits": logits,
+        }
+
+    def calculate_loss(self, output, target):
+        if not isinstance(output, dict) or "loss" not in output:
+            raise ValueError("CausalOrderGumbelSinkhorn expects forward() to return a loss dict.")
+        return output["loss"]
+
+    def sample(
+        self,
+        target_data: Tensor,
+        num_samples: int = 1,
+        mask: Optional[Tensor] = None,
+    ):
+        node_repr = self._encode_raw_data(target_data, mask=mask)
+        orders = self.sample_orders_from_node_repr(
+            node_repr,
+            num_samples=num_samples,
+            mask=mask,
+            deterministic=False,
+        )
+        return orders, mask
+
+    order_edge_precedence_accuracy = staticmethod(
+        CausalTopoOrderDiffusion.order_edge_precedence_accuracy
+    )
 
 
 class CausalPriorityTopoOrderDiffusion(CausalTopoOrderDiffusion):

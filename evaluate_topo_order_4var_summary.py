@@ -153,6 +153,7 @@ def load_model(
 
     module = config.get("module", "probabilistic")
     if module in {
+        "topo_gs_order",
         "topo_diffusion",
         "topo_priority_diffusion",
         "topo_diffusion_skeleton",
@@ -163,6 +164,7 @@ def load_model(
         "source_layer_joint_skeleton_single_encoder",
     }:
         from ml2_meta_causal_discovery.models.topo_order_diffusion import (
+            CausalOrderGumbelSinkhorn,
             CausalPriorityNodeTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionSingleEncoderWithSkeleton,
             CausalPriorityTopoOrderDiffusionWithSkeleton,
@@ -173,7 +175,9 @@ def load_model(
             CausalPriorityTopoOrderDiffusion,
         )
 
-        if module == "topo_priority_diffusion":
+        if module == "topo_gs_order":
+            topo_cls = CausalOrderGumbelSinkhorn
+        elif module == "topo_priority_diffusion":
             topo_cls = CausalPriorityTopoOrderDiffusion
         elif module == "topo_diffusion_skeleton":
             topo_cls = CausalTopoOrderDiffusionWithSkeleton
@@ -201,6 +205,9 @@ def load_model(
             num_nodes=config["num_nodes"],
             n_perm_samples=config.get("n_perm_samples", 25),
             sinkhorn_iter=config.get("sinkhorn_iter", 300),
+            gs_temperature=config.get("gs_temperature", 1.0),
+            gs_noise_factor=config.get("gs_noise_factor", 1.0),
+            gs_train_samples=config.get("gs_train_samples", 1),
             use_positional_encoding=config["use_positional_encoding"],
             topo_num_timesteps=config.get("topo_num_timesteps", 7),
             topo_sample_N=config.get("topo_sample_N", 1),
@@ -382,6 +389,26 @@ def sample_topo_diffusion_orders_from_repr(
 ) -> Any:
     priority_np: Optional[np.ndarray] = None
     with th.no_grad():
+        if hasattr(model, "sample_orders_from_node_repr"):
+            if beam:
+                raise ValueError(
+                    "topo_gs_order does not use beam search; choose sample or deterministic."
+                )
+            orders = model.sample_orders_from_node_repr(
+                node_repr,
+                num_samples=num_order_samples,
+                mask=None,
+                deterministic=deterministic,
+            )
+            if orders.size(1) != 1:
+                raise ValueError(
+                    "The 4-node summary helper expects one dataset at a time."
+                )
+            orders_np = orders[:, 0, :].detach().cpu().numpy().astype(int)
+            if return_priority:
+                return orders_np, priority_np
+            return orders_np
+
         if hasattr(model, "_decode_source_layers_from_node_repr") and not hasattr(model, "reverse_model"):
             batch_size, num_nodes = node_repr.shape[:2]
             valid_nodes = th.ones(

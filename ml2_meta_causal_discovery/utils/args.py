@@ -211,6 +211,24 @@ def retun_default_args(parser):
         help="Number of sinkhorn iterations.",
     )
     parser.add_argument(
+        "--gs_temperature",
+        default=1.0,
+        type=float,
+        help="Sinkhorn temperature for --decoder topo_gs_order.",
+    )
+    parser.add_argument(
+        "--gs_noise_factor",
+        default=1.0,
+        type=float,
+        help="Gumbel-noise scale for --decoder topo_gs_order.",
+    )
+    parser.add_argument(
+        "--gs_train_samples",
+        default=1,
+        type=int,
+        help="Number of soft Gumbel-Sinkhorn samples per training dataset.",
+    )
+    parser.add_argument(
         "--num_topo_order_samples",
         "-ntos",
         default=8,
