@@ -75,10 +75,10 @@ def transformer_classifier_split_withpadding(
     sample_size_min: int, sample_size_max: int
 ):
     def mycollate(batch):
-
-        curr_sample_size = sample_size_min if sample_size_min == sample_size_max else np.random.randint(sample_size_min, sample_size_max)
-        indices = np.random.choice(
-            batch[0][0].shape[0], curr_sample_size, replace=False
+        indices = shared_batch_observation_indices(
+            batch,
+            sample_size_min=sample_size_min,
+            sample_size_max=sample_size_max,
         )
 
         full_data = np.stack([i[0] for i in batch], axis=0)
@@ -102,9 +102,10 @@ def transformer_classifier_split_variable_nodes(
     sample_size_min: int, sample_size_max: int
 ):
     def mycollate(batch):
-        curr_sample_size = sample_size_min if sample_size_min == sample_size_max else np.random.randint(sample_size_min, sample_size_max)
-        indices = np.random.choice(
-            batch[0][0].shape[0], curr_sample_size, replace=False
+        indices = shared_batch_observation_indices(
+            batch,
+            sample_size_min=sample_size_min,
+            sample_size_max=sample_size_max,
         )
 
         full_data = np.stack([i[0] for i in batch], axis=0)
@@ -117,6 +118,52 @@ def transformer_classifier_split_variable_nodes(
         return inputs, targets, None
 
     return mycollate
+
+
+def shared_batch_observation_indices(
+    batch,
+    *,
+    sample_size_min: int,
+    sample_size_max: int,
+):
+    """Sample one observation count and one row subset shared by a whole batch."""
+    if not batch:
+        raise ValueError("Cannot collate an empty batch.")
+    if sample_size_min <= 0 or sample_size_max <= 0:
+        raise ValueError("Sample-size bounds must be positive.")
+    if sample_size_min > sample_size_max:
+        raise ValueError("sample_size_min must not exceed sample_size_max.")
+
+    data_shapes = [item[0].shape for item in batch]
+    observation_counts = {shape[0] for shape in data_shapes}
+    node_counts = {shape[-1] for shape in data_shapes}
+    if len(observation_counts) != 1:
+        raise ValueError(
+            "Every dataset in a batch must store the same number of observations; "
+            f"got shapes {data_shapes}."
+        )
+    if len(node_counts) != 1:
+        raise ValueError(
+            "Every dataset in a batch must have the same node count; "
+            f"got shapes {data_shapes}."
+        )
+
+    curr_sample_size = (
+        sample_size_min
+        if sample_size_min == sample_size_max
+        else np.random.randint(sample_size_min, sample_size_max)
+    )
+    num_observations = next(iter(observation_counts))
+    if curr_sample_size > num_observations:
+        raise ValueError(
+            f"Cannot sample {curr_sample_size} observations without replacement "
+            f"from a dataset containing {num_observations}."
+        )
+    return np.random.choice(
+        num_observations,
+        curr_sample_size,
+        replace=False,
+    )
 
 
 class SameNodeCountBatchSampler(th.utils.data.Sampler):
