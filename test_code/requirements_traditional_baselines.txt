@@ -1,0 +1,17 @@
+# Install in a separate Python 3.10 environment.  Install the PyTorch build
+# matching the machine's CUDA version first if GPU-enabled PyTorch is desired.
+# These pins satisfy both current lingam and the fixed dodiscover commit.
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.6.1
+pandas==2.2.3
+networkx==3.4.2
+h5py==3.11.0
+causal-learn==0.1.4.8
+lingam==1.13.0
+dagma==1.1.1
+
+# Official NOTEARS and experimental PyWhy DoDiscover have no suitable stable
+# PyPI releases for this benchmark, so use immutable official-repository commits.
+notears @ git+https://github.com/xunzheng/notears.git@4a9ab19fe502e392503da331773c5223d82d3666
+dodiscover @ git+https://github.com/py-why/dodiscover.git@6e64456198a5b66e515f250a8f4b143ebc31c9a6
