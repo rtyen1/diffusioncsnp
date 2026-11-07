@@ -2,8 +2,11 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import pickle
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -158,6 +161,123 @@ class Station1GeneratorTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "different protocol"):
                     gen.main(argv + ["--seed", "43"])
             self.assertEqual(json.loads((root / "output/validation_report.json").read_text())["total_datasets"], 2)
+
+
+@unittest.skipUnless(os.environ.get("CAUSALASSEMBLY_R_TESTS") == "1",
+                     "Set CAUSALASSEMBLY_R_TESTS=1 in the causalassembly environment for real R regression tests")
+class Station1RealRConversionTests(unittest.TestCase):
+    """Small real DRFs test exact equivalence, not just statistical similarity."""
+
+    @classmethod
+    def setUpClass(cls):
+        import rpy2.robjects as ro
+        from scipy.stats import gaussian_kde
+        from causalAssembly.drf_fitting import DRF
+        from causalAssembly.models_dag import ProcessCell
+
+        graph = nx.relabel_nodes(nx.from_numpy_array(DAG, create_using=nx.DiGraph),
+                                 dict(enumerate(COLUMNS)))
+        frame = pd.DataFrame(np.random.default_rng(71).normal(size=(64, 6)), columns=COLUMNS)
+        for node in nx.topological_sort(graph):
+            for parent in graph.predecessors(node):
+                frame[node] += np.tanh(frame[parent])
+        cell = ProcessCell(name="Station1")
+        cell.graph = graph
+        ro.r["set.seed"](71)
+        for node in cell.nodes:
+            parents = cell.parents(of_node=node)
+            if not parents:
+                cell.drf[node] = gaussian_kde(frame[node].to_numpy())
+            else:
+                # Small forests keep these regression tests fast. Production
+                # fit_drf's 2,000-tree defaults are never changed by this test.
+                # drf 1.3.1 defaults ci.group.size to floor(num.trees/30),
+                # so fewer than 30 trees trigger an upstream zero-group bug.
+                forest = DRF(num_trees=60, min_node_size=5, splitting_rule="FourierMMD")
+                forest.fit(frame[parents], frame[node])
+                cell.drf[node] = forest
+        cls.old_pickle = pickle.dumps(cell, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def test_all_six_sample_sizes_match_official_float64_and_hdf5(self):
+        baseline = pickle.loads(self.old_pickle)
+        with contextlib.redirect_stdout(io.StringIO()):
+            optimized = gen.retain_r_forests(pickle.loads(self.old_pickle))
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            config = {**protocol(count=2), "sampling_batch_rows": 2048}
+            for n in gen.SAMPLE_SIZES:
+                expected = []
+                for replicate in range(2):
+                    seed = gen.dataset_seed(42, n, replicate)
+                    baseline.random_state = np.random.default_rng(seed)
+                    reference = baseline.sample_from_drf(size=n)
+                    optimized.random_state = np.random.default_rng(seed)
+                    result = optimized.sample_from_drf(size=n)
+                    pd.testing.assert_frame_equal(reference, result, check_exact=True)
+                    expected.append(reference.to_numpy(dtype=np.float32))
+                path = gen.shard_path(Path(temporary), n)
+                gen.generate_cell(path, config, n, DAG, optimized)
+                with h5py.File(path, "r") as handle:
+                    np.testing.assert_array_equal(handle["data"][:], np.stack(expected))
+                    np.testing.assert_array_equal(handle["label"][:], np.broadcast_to(DAG, (2, 6, 6)))
+                    np.testing.assert_array_equal(handle["metadata"][:], gen.expected_metadata(config, n))
+                    self.assertEqual(json.loads(handle.attrs["columns_json"]), COLUMNS)
+                    for replicate, array in enumerate(expected):
+                        self.assertEqual(handle["sample_sha256"][replicate].decode(), gen.sample_hash(array))
+
+    def test_preparation_is_idempotent_and_does_not_consume_randomness(self):
+        import copy
+        import rpy2.rinterface as ri
+        import rpy2.robjects as ro
+        from causalAssembly.drf_fitting import DRF
+
+        cell = pickle.loads(self.old_pickle)
+        cell.random_state = np.random.default_rng(123)
+        numpy_state = copy.deepcopy(cell.random_state.bit_generator.state)
+        r_state = np.array(ro.r[".Random.seed"], copy=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIs(gen.retain_r_forests(cell), cell)
+        for forest in cell.drf.values():
+            if isinstance(forest, DRF):
+                self.assertIsInstance(forest.r_fit_object, ri.ListSexpVector)
+        self.assertEqual(cell.random_state.bit_generator.state, numpy_state)
+        np.testing.assert_array_equal(np.array(ro.r[".Random.seed"]), r_state)
+        # A second preparation must not rebuild already-retained R objects.
+        with mock.patch.object(ro.conversion, "get_conversion", side_effect=AssertionError("reconversion")):
+            self.assertIs(gen.retain_r_forests(cell), cell)
+
+    def test_old_pickle_and_partial_shard_resume_without_refit_or_cache_rewrite(self):
+        import causalAssembly.models_dag as models_dag
+
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            config = {**protocol(count=2, sizes=(20,)), "sampling_batch_rows": 2048}
+            args = SimpleNamespace(output_root=root,
+                                   source_root=Path(models_dag.__file__).resolve().parent.parent)
+            cache = root / "generator/station1_drf.pkl"
+            cache.parent.mkdir()
+            with cache.open("wb") as handle:
+                handle.write(self.old_pickle)
+            checksum = gen.sha256(cache)
+            gen.atomic_json(cache.parent / "cache_manifest.json",
+                            {"protocol_sha256": gen.canonical_hash(config), "pickle_sha256": checksum})
+            path = gen.shard_path(root, 20)
+            gen.create_partial(gen.partial_path(path), config, 20, DAG)
+            baseline = pickle.loads(self.old_pickle)
+            baseline.random_state = np.random.default_rng(gen.dataset_seed(42, 20, 0))
+            first = baseline.sample_from_drf(size=20).to_numpy(dtype=np.float32)
+            with h5py.File(gen.partial_path(path), "r+") as handle:
+                handle["data"][0] = first
+                handle["sample_sha256"][0] = gen.sample_hash(first).encode()
+                handle["completed"][0] = True
+            baseline.random_state = np.random.default_rng(gen.dataset_seed(42, 20, 1))
+            second = baseline.sample_from_drf(size=20).to_numpy(dtype=np.float32)
+            with mock.patch("causalAssembly.drf_fitting.fit_drf", side_effect=AssertionError("must not refit")):
+                optimized = gen.load_or_fit(args, None, None, config)
+            gen.generate_cell(path, config, 20, DAG, optimized)
+            gen.validate_shard(path, config, 20, DAG)
+            with h5py.File(path, "r") as handle:
+                np.testing.assert_array_equal(handle["data"][:], np.stack([first, second]))
+            self.assertEqual(gen.sha256(cache), checksum)
 
 
 if __name__ == "__main__":

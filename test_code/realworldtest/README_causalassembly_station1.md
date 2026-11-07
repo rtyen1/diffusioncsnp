@@ -56,6 +56,28 @@ python -u test_code/realworldtest/generate_causalassembly_station1.py \
 
 在同一条命令末尾增加 `--validate-only` 可重新检查所有最终 HDF5，不重新采样。
 
+## 采样加速（兼容旧缓存与生成进度）
+
+rpy2 3.6 的 NumPy/Pandas 转换器可能把官方拟合返回的森林转换成深层 Python
+`NamedList`。若直接使用，每次 `produce_sample` 都会把整片森林重新转换回 R，
+造成与本次观测行数关系不大的重复开销。脚本现在在拟合完成或加载旧缓存后，
+对每个非根节点的森林只转换一次，并在内存中保留 R 对象；看到
+`Preparing R forest ONCE` 时，这一次性转换仍可能需要等待。
+
+没有修改官方仓库、森林参数、拟合数据、图、随机种子、采样调用顺序、分批大小、
+标准化或 HDF5 格式。仍调用官方预测与抽样代码，而不是只返回条件均值。
+不会改写旧的 `station1_drf.pkl`、缓存校验和或生成协议，因此暂停旧进程、更新
+本脚本后，运行原来的生成命令即可继续：已完成的份数保留，未完成的份数继续生成。
+不要同时运行两个进程，也不要为了加速改变原来的 `--fit-rows` 或分批参数。
+
+快速测试与真实 R 回归测试（后者使用小森林，逐元素检查六种样本量的 float64
+采样、float32 HDF5、图方向、种子与旧缓存断点恢复）：
+
+```bash
+python -m unittest test_code.test_causalassembly_station1
+CAUSALASSEMBLY_R_TESTS=1 python -m unittest test_code.test_causalassembly_station1
+```
+
 ## 输出与恢复
 
 ```text

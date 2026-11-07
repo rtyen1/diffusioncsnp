@@ -267,6 +267,40 @@ def generate_cell(path, protocol, n, dag, cell):
     print(f"CELL COMPLETE: {path}", flush=True)
 
 
+def retain_r_forests(cell):
+    """Keep each fitted forest in R instead of rebuilding it for every sample.
+
+    With rpy2 3.6, the official fit_drf's numpy/pandas converter can return
+    forests as deeply nested Python NamedLists. The official produce_sample
+    then converts that whole tree structure back to R on EVERY prediction.
+    Perform that same deterministic conversion once, retaining its R object.
+    All fitting, predictions, root sampling and random choices remain official.
+
+    This is runtime-only: do not rewrite the old pickle or protocol. Thus an
+    existing generator/partial shard can resume with exactly the same seeds.
+    """
+    import rpy2.rinterface as ri
+    import rpy2.robjects as ro
+    from rpy2.robjects.conversion import localconverter
+    from causalAssembly.drf_fitting import DRF, R_CONVERTER
+
+    for node in cell.nodes:
+        forest = cell.drf[node]
+        if not isinstance(forest, DRF):  # Official KDE roots need no conversion.
+            continue
+        if isinstance(forest.r_fit_object, ri.ListSexpVector):
+            continue
+        started = time.monotonic()
+        print(f"Preparing R forest ONCE: {node}", flush=True)
+        with localconverter(R_CONVERTER):
+            r_forest = ro.conversion.get_conversion().py2rpy(forest.r_fit_object)
+        if not isinstance(r_forest, ri.ListSexpVector):
+            raise TypeError(f"Expected an R list for the fitted forest at {node}")
+        forest.r_fit_object = r_forest
+        print(f"R FOREST READY: {node}; seconds={time.monotonic() - started:.2f}", flush=True)
+    return cell
+
+
 def load_or_fit(args, frame, graph, protocol):
     import rpy2.robjects as ro
     import causalAssembly.models_dag as models_dag
@@ -287,7 +321,7 @@ def load_or_fit(args, frame, graph, protocol):
         if cell.nodes != protocol["columns"] or cell.num_edges != 7:
             raise ValueError("Cached generator has the wrong graph")
         print(f"Loaded fitted generator: {cache}", flush=True)
-        return cell
+        return retain_r_forests(cell)
     if cache.exists() or manifest.exists():
         raise RuntimeError("Incomplete generator cache; keep it for inspection and use a new output directory")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -307,7 +341,7 @@ def load_or_fit(args, frame, graph, protocol):
             os.unlink(name)
     atomic_json(manifest, {"protocol_sha256": canonical_hash(protocol), "pickle_sha256": sha256(cache), "fit_seconds": time.monotonic() - started})
     print(f"GENERATOR FIT COMPLETE: {cache}", flush=True)
-    return cell
+    return retain_r_forests(cell)
 
 
 def validate_benchmark(output_root, protocol, dag):
