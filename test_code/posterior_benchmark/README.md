@@ -1,154 +1,228 @@
-# 三节点、25 张 DAG 的固定先验后验拟合数据
+# 三节点 25-DAG 后验实验：独立训练，2000 观测动态子采样
 
-生成入口：`generate_training_data.py`。只需要 NumPy、h5py，不导入模型、PyTorch、
-TensorFlow、GPflow，不需要 GPU。模型训练代码不包含在这个数据生成入口内。
+当前入口版本是 `independent-v3`。一次命令只训练一个模型：`diffusion`、`pl` 或
+`categorical`。三个模型独立生成数据、独立抽样、独立保存和续训，不再共享训练批次
+或抽样计划。它们仍使用相同的 SEM 先验和训练预算。**数据生成与训练均不标准化。**
+训练期间不自动验证、不自动测试，也不预先生成测试集；测试是之后的手动操作。
+旧 posterior v1/v2 运行目录、旧训练入口和其他 benchmark 结果不会被覆盖。
 
-## 1. 唯一的生成分布
+## 1. 生成分布与参考后验
 
-`all_25_sems.tex` 是用户原始 SEM 表的项目内快照，仅规范化 CRLF -> LF 和文件末尾
-换行，文本内容不变。保留原 A/B/C 标签、DAG #1..#25、MEC #1..#11、系数和外生噪声方差。
-参数不重新采样。图的先验是每张 DAG 1/25，不是每个 MEC 1/11。
+`all_25_sems.tex` 是原始 SEM 表的项目内快照（仅规范化文本换行），包括三节点
+A/B/C 上全部 25 张 DAG、11 个 MEC、固定结构系数和独立高斯外生噪声方差。
+图先验是每张 DAG 1/25，不是每个 MEC 1/11。每个 shard 的图标签严格均衡并打乱，
+观测噪声独立采样；SEM 参数本身不重新采样。不做节点置换增强或 iSCM 标准化。
 
-每份数据选择一张 DAG，生成 n 个独立观测，已知总体均值为零。数据不去均值，
-不标准化，不使用 iSCM，不做节点置换增广。各 split/n/shard 的图标签严格均衡并
-打乱顺序（分层抽样，非跨数据集的独立二项计数），因此单份数据的边缘图先验
-仍为 1/25。观测噪声在各份数据及 train/val/test 之间使用独立 seed 流。
-三个 split 使用同一 SEM 先验，但不共享观测；这是同先验后验拟合，不是未知图泛化。
+约定 B[i,j] 是 i -> j 的系数。列向量 SEM 为 x=B^T x+epsilon，
+epsilon~N(0,Omega)，因此 F=(I-B^T)^(-1) Omega^(1/2)，Sigma=F F^T。
+默认用对应 Sigma 的 Cholesky 因子 L 生成 X=Z L^T，与逐父子节点生成 SEM 的
+**联合观测分布**等价。Cholesky 因子不是图标签；label 始终来自原 SEM 的箭头。
+`generate_training_data.py --sampling-method sem` 也支持直接沿父子关系采样。
 
-## 2. 为什么与父节点生成子节点等价
-
-约定 B[i,j] 是 i -> j 的系数，列向量方程是 x=B^T x+epsilon，
-epsilon~N(0,Omega)，Omega 为对角噪声方差矩阵。因此
-
-```text
-F = (I - B^T)^(-1) Omega^(1/2)
-Sigma = F F^T
-```
-
-默认以各 MEC 的 Sigma 做一次 Cholesky 分解 Sigma=L L^T，再以 X=Z L^T 采样，
-Z 的各项是独立标准高斯。这与原 SEM **观测分布**相同；不会拿 Cholesky 的下三角
-结构代替原 DAG。图标签始终取自原结构方程的非零系数。这里只生成观测数据，
-不声称用 Cholesky 因子生成的干预分布也与原 SEM 相同。
-
-启动时自动检查：
-
-- 恰好枚举三节点全部 25 张不同 DAG；方向、拓扑序和 SEM 文本标题一致。
-- 标注的 MEC 与 skeleton/v-structure 分组一致。
-- 从 25 个 SEM 推出的 Sigma 各自等于文本中的声明；11 个 Sigma 正定。
-- 使用同一标准外生噪声时，逐节点 SEM 与矩阵 SEM 生成值一致到浮点精度。
-- F 与 L 之间的噪声旋转为正交矩阵；正确耦合噪声后，两种采样值一致。
-
-注意：不能要求给 F 和 L 直接输入同一 Z 就逐元素相同，不同协方差因子通常
-对应不同的噪声坐标。相同的是联合观测分布，不是两个任意随机数实现的逐点输出。
-若希望直接沿父子关系采样，可使用 `--sampling-method sem`（需要另一个输出目录）。
-
-## 3. 精确后验与充分统计量
-
-对每份原始数据 X，保存未经去均值的 scatter S=X^T X，并计算
+生成器检查全部 25 个图的方向、拓扑序、MEC、协方差和正定性，并检验逐节点 SEM
+与矩阵形式的等价性。已知总体均值是零；对原始 X 使用未经去均值的 S=X^T X：
 
 ```text
-log p(X|G) = -1/2 * [n*3*log(2*pi) + n*log|Sigma_G| + tr(Sigma_G^(-1) S)]
+log p(X|G) = -0.5 * [3*n*log(2*pi) + n*log|Sigma_G| + tr(Sigma_G^(-1)*S)]
 p(G|X) = softmax_G(log p(X|G) + log(1/25))
 ```
 
-不是 BIC、MCMC 或参数估计后再代入的近似；这是固定 SEM / 点质量参数先验下，
-数值枚举得到的精确图后验（限于 float64 数值精度），并非共轭参数先验实验。
-11 个 MEC 共用 11 个似然，同一 MEC 内每张 DAG 的后验严格相同。
-使用 log-sum-exp 防止下溢；同时保存 log_posterior，极小尾概率即使在普通
-posterior 中下溢到 0，其对数仍保留。数据与后验全部 float64，后验从实际保存的
-同一份数据计算，避免先生成后验、再有损转换输入造成不一致。
+这是固定 SEM/点质量参数先验下枚举得到的精确后验（float64 精度），不是共轭参数
+先验、BIC、MCMC 或拟合参数后代入的近似。同 MEC 内的似然与图后验严格相等：例如
+MEC 4 的 DAG #4/#6/#14，大样本时各接近 1/3，而非某一张接近 1。
 
-`sufficient_statistics` 的七维顺序为
-`[n,S_AA,S_BB,S_CC,S_AB,S_AC,S_BC]`。真实后验恰为该向量经过线性 logits 和 softmax；
-`catalogue.json` 中还保存了对应解析权重和偏置，便于校验分类头或设置解析参考。
-不应使用 np.cov 的默认去均值协方差替代 S，因为总体均值在本模型中已知为零。
+生成器保存原始 float64 `data[K,n,3]`、`label[K,3,3]`、`class_index`（0..24）、
+`graph_id`（1..25）、`mec_id`、`dataset_seed`、`posterior/log_posterior[K,25]`、
+`mec_posterior[K,11]`、`scatter`、`sufficient_statistics` 和逐 dataset 的 X SHA256。
+posterior 顺序始终对应文档 DAG #1..#25。网络只读取 X 和图标签；充分统计量和
+精确后验不进入训练。训练文件中保存的 2000 观测后验也不作为子样本训练标签。
 
-## 4. 默认规模、文件与种子
+独立数据生成脚本保留旧协议，NumPy+h5py 即可运行；流式训练会自动调用同一生成器，
+不需要先执行独立生成命令。训练文件为 `train/n2000/d3_shard_*.hdf5`，每份 dataset
+确实有 2000 条原始观测，既未经验去均值，也未经验标准化。
 
-观测数：20、100、500。每个观测数分别有：
+## 2. 与原训练的关系
 
-| split | 数据集数 | 每张 DAG 数量 |
-|---|---:|---:|
-| train | 50,000 | 2,000 |
-| val | 2,500 | 100 |
-| test | 5,000 | 200 |
+直接复用原来的 `CausalTNPEncoder`、`BakStyleSkeletonHead`、GPL denoiser、
+PL 概率函数、Kahn 排序和 `DiffusionUtils` 的 riffle 加噪实现。采样直接调用
+`datautils.shared_batch_observation_indices`，不重写它的概率分布。
+这不是把旧 `train_causal_classify.py` 原封不动运行：需要适配三种输出头、关闭输入
+标准化/自动评测，并按下面的实验目标训练；旧的 precedence 辅助头和点估计 rerank
+不参与此受控后验实验。默认不带 u，不把它冒称为原 hybrid-e5 带 u 权重的直接延续。
 
-合计 train=150,000，val=7,500，test=15,000，总计 172,500 份。
-每个 HDF5 默认最多 5,000 份。预计原始观测约 856 MB，加上后验、统计量及其他
-字段，总体约 1 GB，实际以磁盘文件为准。分批生成、分批写盘，不把整套数据放入内存。
+共同架构默认 d_model=256、FFN=512、8 heads、4 层 causal encoder，emb_depth=1，
+无节点位置编码，dropout=0.1。skeleton decoder 为 2 层，GPL denoiser 为 7 层。
+网络内部 LayerNorm 保留，不等于对输入 X 做标准化。
+
+| method | 训练方式 |
+|---|---|
+| diffusion | 原来的随机合法序 + riffle 前向加噪 + 多步 GPL 反向去噪，另加普通 skeleton BCE |
+| pl | skeleton 与单步 PL 构成的精确图概率 NLL：-log q(G_sampled|X) |
+| categorical | 固定 A/B/C 顺序拼接 encoder 节点表示，MLP+25类 softmax，图标签 NLL |
+
+diffusion 默认 `--diffusion-loss denoising`：**直接调用原类的**
+`_training_losses_per_batch`，使用时间表 0/4/7/11，sample_N=1。
+skeleton 也调用原 `_skeleton_loss_per_batch`，仅设 `skeleton_loss_type=bce`，
+不是 balanced/mixed-balanced BCE。默认总损失为 0.2*order_loss + 1.0*skeleton_loss。
+训练日志分别显示 loss、order_loss、skeleton_loss，不能把它与另外两模型的 NLL
+数值当作同一种训练损失比较。
+
+保留显式 `--diffusion-loss graph_nll` 作为另一种实验：通过有限状态枚举直接优化
+完整图 NLL，而不是旧去噪代理目标。不同目标必须使用新 run-root，不能混写实验。
+
+如需 u，可用新目录加 `--priority-samples 16`。diffusion 去噪训练使用原 priority
+Kahn 排序和新采样的连续 uniform-u；评测时用 checkpoint 中固定的 16 个 u 近似
+边缘积分。PL 也接收 u 值/秩并使用固定样本库定义混合分布。这时不是纯单个 PL；
+给定 u 的排列/路径求和精确，但对连续 u 的积分是 MC 近似。默认 0 时全部精确枚举。
+
+## 3. 每批抽样与独立流式训练
+
+每个训练 dataset 保存 2000 条观测，每个 minibatch（默认 16 份 dataset）使用
+原规则随机决定一个 n，随后无放回抽取 n 个观测行，batch 内共用行索引：
+
+- 50% log-uniform `[20,2001)`，50% integer-uniform `[100,2001)`；n 在 batch 间交错。
+- 同一次训练只产生一个模型，不按 n 分别训练多个模型。
+- 三个模型的训练 n 和行索引无需一致，不保存跨模型共享抽样计划。
+- 抽取前后都不标准化，只将实际输入转换成网络的 float32。
+
+`--data-seed` 是基础 seed。代码用 method 和 training_seed 派生独立训练数据 seed，
+写入 run_config；所以三个命令即使都用默认 seed，也生成独立训练观测。
+各自使用自己的 NumPy/Torch RNG；完整 checkpoint 保存 RNG 与 batch cursor。
+
+默认每个模型每批 70000 份新数据、10 批，共 70 万份独立训练 dataset。每份只遍历
+一次，每批结束不重置模型或优化器。单批原始 X 约 3.36 GB（3.13 GiB），另有标签、
+统计量、checkpoint 开销；不是一次把整个 HDF5 载入 RAM。
+
+优化器 AdamW，lr=2e-4、weight_decay=1e-5，3750 个全局训练步线性 warmup 后恒定
+学习率，gradient_clip=1。样本量上下界、hybrid 比例与普通 uniform/log_uniform
+均有参数可配置。每个 minibatch 的实际 n 会打印，批次 n 直方图会归档。
 
 ```text
-OUTPUT/
-  all_25_sems.tex
-  catalogue.json
-  generation_config.json
-  validation_report.json
-  train/
-    n20/d3_shard_00000.hdf5 ...
-    n100/d3_shard_00000.hdf5 ...
-    n500/d3_shard_00000.hdf5 ...
-  val/n20/...  val/n100/...  val/n500/...
-  test/n20/... test/n100/... test/n500/...
+模型自己的生成批次 k（每份 2000 观测）
+  -> 按旧规则逐 batch 随机抽 n 条，训练这个模型
+  -> 保存完整 checkpoint、归档生成 seed/数据指纹/抽样轨迹摘要
+  -> 提交完成状态
+  -> 可选删除该模型本批的数据
+  -> 生成该模型下一批新数据，继续训练
 ```
 
-每个 HDF5 中 K 份数据的主要字段：
+`--delete-trained-chunks` 只删除本 run 自己拥有、且 checkpoint 完整保存/校验成功
+的那一个 chunk，不等待别的模型，不删除旧训练数据或 checkpoint。
+Ctrl+C/SIGTERM 会在训练中等当前 batch 完成后保存；中断批次保留。相同命令加
+`--resume` 可恢复数据、抽样 RNG、去噪 RNG、优化器和计数，不重复累计已保存训练步。
+首次初始化的安全中断也可恢复。所有训练阶段都不自动验证或测试。
 
-| 字段 | 形状/含义 |
-|---|---|
-| data | [K,n,3]，原始 float64 观测，列顺序 A/B/C |
-| label | [K,3,3]，int8，label[i,j]=1 表示 i -> j |
-| graph_id | [K]，与文档一致的 1..25 |
-| class_index | [K]，分类头用 0..24，等于 graph_id-1 |
-| mec_id | [K]，1..11 |
-| posterior / log_posterior | [K,25]，顺序对应 DAG #1..#25 |
-| mec_posterior | [K,11]，同 MEC 的图概率求和 |
-| scatter | [K,3,3]，未经去均值的 X^T X |
-| sufficient_statistics | [K,7]，包含 n 的充分统计量 |
-| log_evidence | [K]，包含高斯归一化常数的 log p(X) |
-| dataset_seed / metadata | 随机种子、图编号、MEC 和 n |
+## 4. 上传与测试代码
 
-seed 由 master seed、split code、n、全局 dataset index 派生，标签打乱使用另一条
-独立流。batch-size 不影响数据；三模型必须读取同一套文件，不分别重生成。
-改变总量、分片大小、seed、SEM 文档、采样方式或依赖版本需要新目录。
+本地上传（当前 SSH 端口 34688）：
 
-分片写入隐藏 `.partial.hdf5`，每批 flush 后才记录完成标记。正常中断后原命令
-重跑会验证并跳过已完成的行/文件，只补未完成部分。不覆盖不同协议的旧数据。
-完成校验会重新核算后验、统计量、图标签、图先验均衡、seed 唯一性和数据 SHA256。
+```bash
+rsync -ah --exclude='__pycache__/' -e 'ssh -p 34688' \
+  /home/rtyen/projects/CausalStructureNeuralProcess-main/test_code/posterior_benchmark/ \
+  root@connect.westd.seetacloud.com:/root/autodl-tmp/projects/diffusioncsnp/test_code/posterior_benchmark/
+```
 
-## 5. 服务器命令
-
-在项目目录运行，不需要重新安装模型环境。使用已有 csnp Python：
+也可以使用 git add/commit/push 与服务器 pull --ff-only，但不要强行覆盖工作区冲突。
+服务器使用已有 csnp Python，无需 conda activate：
 
 ```bash
 cd /root/autodl-tmp/projects/diffusioncsnp
-/root/autodl-tmp/conda-envs/csnp/bin/python -u \
-  test_code/posterior_benchmark/generate_training_data.py \
-  --output-root /root/autodl-tmp/datasets/synth_training_data/posterior_d3_25dag_uniform_fixedsem_n20_100_500_v1 \
-  --sample-sizes 20,100,500 \
-  --train-per-size 50000 --val-per-size 2500 --test-per-size 5000 \
-  --datasets-per-file 5000 --batch-size 128 \
-  --sampling-method covariance --seed 20261107
+/root/autodl-tmp/conda-envs/csnp/bin/python -m unittest \
+  test_code.posterior_benchmark.test_generate_training_data \
+  test_code.posterior_benchmark.test_training
 ```
 
-成功时末尾显示 `POSTERIOR DATA COMPLETE: datasets=172500`。
-原命令加 `--validate-only` 可重新检查，不重采样。代码默认读取同目录打包的 tex，
-无需在服务器上额外找到本地 `/home/rtyen/projects/all_25_sems.tex`。
+包含旧去噪 loss 数值等价、旧抽样函数等价、生成 2000 再抽样、无标准化、独立训练、
+中断/追加恢复、只删本模型数据、手动统一评测和精确 KL 等端到端检查。
 
-本地/服务器单元测试：
+## 5. 三个模型分别启动
+
+三个命令各自独立。建议先在一个 screen 中跑 diffusion，再分别启动其他方法；
+不建议未经显存检查就同时跑三个 GPU 训练。
 
 ```bash
-python -m unittest test_code.posterior_benchmark.test_generate_training_data
+cd /root/autodl-tmp/projects/diffusioncsnp
+screen -S posterior_diffusion
 ```
 
-## 6. 后续训练不能直接套用旧训练命令
+在 screen 内运行 diffusion：
 
-旧训练入口可能会逐变量标准化、随机抽观测行或进行其他增广；这会使这里保存的
-后验目标不再对应模型看到的原始数据。后续应使用专门的共享先验后验训练入口：
-三模型使用相同数据/充分统计量，并明确接收 n；不擅自标准化，不丢观测。
-如改变观测子集，要重新计算后验。若重新标记 A/B/C，还会改变固定参数先验，
-不能只置换图标签就继续用本实验的似然。网络内部的排序表示变换与数据增广不同，
-内部变换只要正确映射回原标签即可。
+```bash
+/root/autodl-tmp/conda-envs/csnp/bin/python -u test_code/posterior_benchmark/run_streaming.py \
+  --method diffusion \
+  --run-root /root/autodl-tmp/outputs/posterior_benchmark/d3_diffusion_independent_v3 \
+  --chunks 10 --train-per-chunk 70000 --delete-trained-chunks --resume
+```
 
-先验中的不可识别性是刻意保留的：数据足够确定 MEC 4 时，DAG #4/#6/#14 的
-后验接近各 1/3，而不是某一张变成概率 1。不能把生成时抽到的 graph_id 当作
-唯一正确的后验软标签；posterior 才是后验拟合的目标。
+PL：
+
+```bash
+/root/autodl-tmp/conda-envs/csnp/bin/python -u test_code/posterior_benchmark/run_streaming.py \
+  --method pl \
+  --run-root /root/autodl-tmp/outputs/posterior_benchmark/d3_pl_independent_v3 \
+  --chunks 10 --train-per-chunk 70000 --delete-trained-chunks --resume
+```
+
+25 分类：
+
+```bash
+/root/autodl-tmp/conda-envs/csnp/bin/python -u test_code/posterior_benchmark/run_streaming.py \
+  --method categorical \
+  --run-root /root/autodl-tmp/outputs/posterior_benchmark/d3_categorical_independent_v3 \
+  --chunks 10 --train-per-chunk 70000 --delete-trained-chunks --resume
+```
+
+每个 run 的 `checkpoints/METHOD_seed0/` 保存 `latest.pt` 与
+`checkpoint_chunk_00001.pt` 等完整状态，编号对应新数据批次，不是同一批重复 epoch。
+`data_protocols/chunk_00001.json` 保存生成设置、指纹和实际 n 直方图。
+`run_state.json` 的 `training_complete` 表示训练完成，不表示已经测试。
+
+中断后原命令重跑即可。增加训练量时保持其他设置不变，改为
+`--chunks 20 --resume --extend-target`。加 `--dry-run` 只打印协议，不创建或删除文件。
+新的 v3 不会接着旧 v1/v2 目录训练；它们的数据组织/目标不同，必须使用新目录。
+
+## 6. 之后手动评测
+
+训练不共享数据，但比较效果时仍应使用相同测试 X。统一评测入口先固定 checkpoint，
+再让全部模型读取同一套固定测试数据。默认测试 n=20/50/100/300/500/1000/2000，
+每种 n=5000 份；仅第一次手动测试时才生成，使用独立 evaluation_seed。
+测试数据不标准化，精确后验由实际这 n 条原始观测计算，不使用训练文件的后验。
+
+以三个模型都完成第 10 批为例：
+
+```bash
+/root/autodl-tmp/conda-envs/csnp/bin/python -u test_code/posterior_benchmark/evaluate.py \
+  --run-roots \
+    /root/autodl-tmp/outputs/posterior_benchmark/d3_diffusion_independent_v3 \
+    /root/autodl-tmp/outputs/posterior_benchmark/d3_pl_independent_v3 \
+    /root/autodl-tmp/outputs/posterior_benchmark/d3_categorical_independent_v3 \
+  --checkpoint chunk_00010 \
+  --output-root /root/autodl-tmp/outputs/posterior_benchmark/d3_compare_independent_v3/chunk_00010
+```
+
+单独测试某模型可用 `--run-root`。`last_completed`（默认）和 `latest` 别名均会
+先解析成已完成的不可变 chunk archive，**不会评分正在更新的 latest.pt**。
+追加训练后评分新的 chunk 会使用新目录，不覆盖之前结果。缓存核验 checkpoint、
+源代码、输入数据和输出文件的 hash，不悄悄复用不兼容结果。
+
+图概率统一为 q(G|X)=q(S_G|X) sum_{pi in Topo(G)} q(pi|X)。不阈值化 skeleton，
+不选众数/medoid，不额外乘 1/25，也不除以合法序数量。PL 直接算六个排列概率；
+diffusion 从均匀终端排列开始，用每步 6x6 转移矩阵在 log 空间求和全部路径。
+评测阶段的精确枚举不改变默认去噪训练目标；原独立 skeleton/order 的表达限制保留。
+
+结果目录：
+
+```text
+OUTPUT/
+  raw_metrics.csv
+  summary_by_samples.csv
+  summary_across_training_seeds.csv
+  evaluation_config.json
+  METHOD_seed0/predictions/n100.npz ...
+```
+
+NPZ 包含真实与预测的完整 25 维 posterior/log_posterior、图/MEC 编号、dataset_seed
+和原始 X SHA256。汇总前检查测试 dataset 一一配对，不要求训练数据或抽样轨迹相同。
+主指标为自然对数 KL(p_exact || q_model)，另有 TV、JS、图 NLL、MEC KL、真实 MEC
+概率质量和类内条件 TV。`summary_by_samples.csv` 的 mean/std 在每个 model/seed/n
+组的单个 dataset 之间计算，SD 用 ddof=1；跨训练 seed 的 SD 单独保存，不混用。
