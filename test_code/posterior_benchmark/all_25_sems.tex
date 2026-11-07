@@ -1,0 +1,158 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+\title{Fixed per-DAG structural equation models ($d=3$, 25 DAGs, 11 MECs)}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+\noindent All models share mean $\mu=(0,0,0)$; the noises $\varepsilon_A,\varepsilon_B,\varepsilon_C$
+are mutually independent Gaussians. DAGs in the same MEC share the same fixed covariance $\Sigma_c$
+and hence the same joint Gaussian $N(0,\Sigma_c)$.
+\paragraph{MEC 1} Shared covariance \(\Sigma_1=\begin{pmatrix}1 & 0 & 0 \\0 & 1 & 0 \\0 & 0 & 1 \\\end{pmatrix}\); DAGs: \emph{empty}.
+
+\noindent\textbf{DAG \#1: empty \ (MEC 1)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 2} Shared covariance \(\Sigma_2=\begin{pmatrix}1 & 0 & 0 \\0 & 1 & 0.5 \\0 & 0.5 & 1 \\\end{pmatrix}\); DAGs: \emph{C->B, B->C}.
+
+\noindent\textbf{DAG \#2: C->B \ (MEC 2)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= 0.5 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 3} Shared covariance \(\Sigma_3=\begin{pmatrix}1 & 0 & 0.5 \\0 & 1 & 0 \\0.5 & 0 & 1 \\\end{pmatrix}\); DAGs: \emph{C->A, A->C}.
+
+\noindent\textbf{DAG \#3: C->A \ (MEC 3)}
+\begin{align*}
+A &= 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 4} Shared covariance \(\Sigma_4=\begin{pmatrix}1 & 0.25 & 0.5 \\0.25 & 1 & 0.5 \\0.5 & 0.5 & 1 \\\end{pmatrix}\); DAGs: \emph{C->B,C->A, B->C,C->A, C->B,A->C}.
+
+\noindent\textbf{DAG \#4: C->B,C->A \ (MEC 4)}
+\begin{align*}
+A &= 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= 0.5 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\noindent\textbf{DAG \#5: B->C \ (MEC 2)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#6: B->C,C->A \ (MEC 4)}
+\begin{align*}
+A &= 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\paragraph{MEC 5} Shared covariance \(\Sigma_5=\begin{pmatrix}1 & 0.5 & 0 \\0.5 & 1 & 0 \\0 & 0 & 1 \\\end{pmatrix}\); DAGs: \emph{B->A, A->B}.
+
+\noindent\textbf{DAG \#7: B->A \ (MEC 5)}
+\begin{align*}
+A &= 0.5 B + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 6} Shared covariance \(\Sigma_6=\begin{pmatrix}1 & 0.5 & 0.25 \\0.5 & 1 & 0.5 \\0.25 & 0.5 & 1 \\\end{pmatrix}\); DAGs: \emph{B->A,C->B, B->A,B->C, A->B,B->C}.
+
+\noindent\textbf{DAG \#8: B->A,C->B \ (MEC 6)}
+\begin{align*}
+A &= 0.5 B + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= 0.5 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 7} Shared covariance \(\Sigma_7=\begin{pmatrix}1.25 & 0.5 & 0.5 \\0.5 & 1 & 0 \\0.5 & 0 & 1 \\\end{pmatrix}\); DAGs: \emph{B->A,C->A}.
+
+\noindent\textbf{DAG \#9: B->A,C->A \ (MEC 7)}
+\begin{align*}
+A &= 0.5 B + 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 8} Shared covariance \(\Sigma_8=\begin{pmatrix}1.5 & 0.75 & 0.75 \\0.75 & 1 & 0.5 \\0.75 & 0.5 & 1 \\\end{pmatrix}\); DAGs: \emph{B->A,C->B,C->A, B->A,B->C,C->A, B->A,B->C,A->C, A->B,C->B,C->A, A->B,C->B,A->C, A->B,B->C,A->C}.
+
+\noindent\textbf{DAG \#10: B->A,C->B,C->A \ (MEC 8)}
+\begin{align*}
+A &= 0.5 B + 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= 0.5 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\noindent\textbf{DAG \#11: B->A,B->C \ (MEC 6)}
+\begin{align*}
+A &= 0.5 B + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#12: B->A,B->C,C->A \ (MEC 8)}
+\begin{align*}
+A &= 0.5 B + 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#13: A->C \ (MEC 3)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 A + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#14: C->B,A->C \ (MEC 4)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= 0.5 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= 0.5 A + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\paragraph{MEC 9} Shared covariance \(\Sigma_9=\begin{pmatrix}1 & 0 & 0.5 \\0 & 1 & 0.5 \\0.5 & 0.5 & 1.25 \\\end{pmatrix}\); DAGs: \emph{B->C,A->C}.
+
+\noindent\textbf{DAG \#15: B->C,A->C \ (MEC 9)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 A + 0.5 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\paragraph{MEC 10} Shared covariance \(\Sigma_10=\begin{pmatrix}1 & 0.5 & 0.5 \\0.5 & 1 & 0.25 \\0.5 & 0.25 & 1 \\\end{pmatrix}\); DAGs: \emph{B->A,A->C, A->B,C->A, A->B,A->C}.
+
+\noindent\textbf{DAG \#16: B->A,A->C \ (MEC 10)}
+\begin{align*}
+A &= 0.5 B + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.5 A + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#17: B->A,B->C,A->C \ (MEC 8)}
+\begin{align*}
+A &= 0.75 B + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.9375),\\B &= \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 1),\\C &= 0.4 A + 0.2 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.6).
+\end{align*}
+
+\noindent\textbf{DAG \#18: A->B \ (MEC 5)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= 0.5 A + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\paragraph{MEC 11} Shared covariance \(\Sigma_11=\begin{pmatrix}1 & 0.5 & 0 \\0.5 & 1.25 & 0.5 \\0 & 0.5 & 1 \\\end{pmatrix}\); DAGs: \emph{A->B,C->B}.
+
+\noindent\textbf{DAG \#19: A->B,C->B \ (MEC 11)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= 0.5 A + 0.5 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\noindent\textbf{DAG \#20: A->B,C->A \ (MEC 10)}
+\begin{align*}
+A &= 0.5 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.75),\\B &= 0.5 A + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\noindent\textbf{DAG \#21: A->B,C->B,C->A \ (MEC 8)}
+\begin{align*}
+A &= 0.75 C + \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 0.9375),\\B &= 0.4 A + 0.2 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.6),\\C &= \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 1).
+\end{align*}
+
+\noindent\textbf{DAG \#22: A->B,B->C \ (MEC 6)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= 0.5 A + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= 0.5 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#23: A->B,A->C \ (MEC 10)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1),\\B &= 0.5 A + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.75),\\C &= 0.5 A + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.75).
+\end{align*}
+
+\noindent\textbf{DAG \#24: A->B,C->B,A->C \ (MEC 8)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1.5),\\B &= 0.4 A + 0.2 C + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.6),\\C &= 0.5 A + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.625).
+\end{align*}
+
+\noindent\textbf{DAG \#25: A->B,B->C,A->C \ (MEC 8)}
+\begin{align*}
+A &= \varepsilon_A, & \varepsilon_A \sim \mathcal{N}(0, 1.5),\\B &= 0.5 A + \varepsilon_B, & \varepsilon_B \sim \mathcal{N}(0, 0.625),\\C &= 0.4 A + 0.2 B + \varepsilon_C, & \varepsilon_C \sim \mathcal{N}(0, 0.6).
+\end{align*}
+\end{document}
